@@ -40,7 +40,7 @@ jobs:
             pkg-config \
             valgrind \
             xvfb \
-            x11-utils  # Required for X11-related testing, like checking if the window opens
+            x11-utils
 
       - name: Set up environment variables
         shell: bash
@@ -49,9 +49,9 @@ jobs:
             echo "==> Building with ASan + UBSan"
             export CC=clang
             export CXX=clang++
-            export CFLAGS="-O1 -g -fsanitize=address,undefined"
+            export CFLAGS="-O1 -g -fsanitize=address,undefined,leak"
             export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-fsanitize=address,undefined"
+            export LDFLAGS="-fsanitize=address,undefined,leak"
           elif [ "${{ matrix.sanitizer }}" = "valgrind" ]; then
             echo "==> Building for Valgrind checks"
             export CC=gcc
@@ -82,18 +82,20 @@ jobs:
       - name: Test the application
         shell: bash
         run: |
-          # Run the application (replace `1term` with the actual name of your app)
-          # Use Xvfb to simulate an X11 server (for headless environments)
           nohup 1term &
           sleep 10  # Give the app a moment to start up
 
-          # Optionally, use xdotool to check if the window opened (replace '1term' with the window name)
-          if xwininfo -name "1term" > /dev/null; then
-            echo "Application window opened successfully."
-          else
+          if ! xwininfo -name "1term" > /dev/null; then
             echo "Failed to open the application window."
             exit 1
           fi
 
-          # Run additional tests if needed
-          # For example, you can check for specific logs or output that indicate success
+          xdotool search --name "1term" windowfocus key F1  # Simulate pressing F1 to check if the app is responsive
+
+          if [ "${{ matrix.sanitizer }}" = "valgrind" ]; then
+            valgrind --leak-check=full --track-origins=yes ./1term
+          fi
+
+          if [ "${{ matrix.sanitizer }}" = "asan-ubsan" ]; then
+            ./1term
+          fi
