@@ -1,125 +1,204 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <gtk/gtk.h>
 #include <vte/vte.h>
+#include <pwd.h>
+#include <sys/types.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
 
-/*
- * 1term: lightweight gtk4 terminal using VTE
- *
- */
+static gboolean debug_enabled = FALSE;
+static GPid g_child_pid = -1;
 
-static gboolean on_terminal_key_pressed(GtkEventControllerKey* controller,
+#define DPRINT(...)               \
+    do {                          \
+        if (debug_enabled)        \
+            g_print(__VA_ARGS__); \
+    } while (0)
+
+static uid_t get_process_euid(GPid pid) {
+    if (pid < 1)
+        return (uid_t)-1;
+    gchar* path = g_strdup_printf("/proc/%d/status", (int)pid);
+    FILE* f = fopen(path, "r");
+    uid_t euid = (uid_t)-1;
+
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (g_str_has_prefix(line, "Uid:")) {
+                unsigned ruid_i, euid_i_, suid_i, fsuid_i;
+                if (sscanf(line, "Uid:\t%u\t%u\t%u\t%u", &ruid_i, &euid_i_, &suid_i, &fsuid_i) == 4) {
+                    euid = (uid_t)euid_i_;
+                    break;
+                }
+            }
+        }
+        fclose(f);
+    }
+    else {
+        DPRINT("Could not open %s\n", path);
+    }
+    g_free(path);
+    return euid;
+}
+
+static gchar* get_hostname_stripped(void) {
+    char hostname[256] = {0};
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        char* dot = strchr(hostname, '.');
+        if (dot)
+            *dot = '\0';
+        return g_strdup(hostname);
+    }
+    return g_strdup("unknown");
+}
+
+static void on_vte_title_changed(VteTerminal* term, GParamSpec* p, gpointer data) {
+    GtkWindow* win = GTK_WINDOW(data);
+    gchar* title = NULL;
+    g_object_get(term, "window-title", &title, NULL);
+    if (title && *title) {
+        DPRINT("on_vte_title_changed: %s\n", title);
+        gtk_window_set_title(win, title);
+    }
+    g_free(title);
+}
+
+static void on_working_directory_changed(GObject* obj, GParamSpec* p, gpointer data) {
+    GtkWindow* win = GTK_WINDOW(data);
+    gchar* uri = NULL;
+    g_object_get(obj, "current-directory-uri", &uri, NULL);
+    if (!uri) {
+        DPRINT("No URI.\n");
+        return;
+    }
+    gchar* cwd = g_filename_from_uri(uri, NULL, NULL);
+    g_free(uri);
+    if (!cwd) {
+        DPRINT("g_filename_from_uri() failed.\n");
+        return;
+    }
+    uid_t euid = get_process_euid(g_child_pid);
+    struct passwd* pw = (euid != (uid_t)-1) ? getpwuid(euid) : NULL;
+    const gchar* user = (pw && pw->pw_name) ? pw->pw_name : "unknown";
+    gchar* host = get_hostname_stripped();
+    gchar* title = g_strdup_printf("%s@%s: %s", user, host, cwd);
+
+    DPRINT("on_working_directory_changed: '%s'\n", title);
+    gtk_window_set_title(win, title);
+    g_free(title);
+    g_free(host);
+    g_free(cwd);
+}
+
+static void spawn_cb(VteTerminal* term, GPid pid, GError* err, gpointer user_data) {
+    if (err) {
+        g_printerr("Error spawning child: %s\n", err->message);
+        g_clear_error(&err);
+        return;
+    }
+    g_child_pid = pid;
+    DPRINT("Shell spawned, PID=%d\n", (int)pid);
+}
+
+static gboolean on_terminal_key_pressed(GtkEventControllerKey* ctl,
                                         guint keyval,
-                                        guint keycode,
-                                        GdkModifierType state,
-                                        gpointer user_data) {
-    VteTerminal* terminal = VTE_TERMINAL(user_data);
-
-    /* Check if Ctrl+Shift is pressed */
-    if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK)) {
+                                        guint code,
+                                        GdkModifierType st,
+                                        gpointer data) {
+    VteTerminal* term = VTE_TERMINAL(data);
+    if ((st & GDK_CONTROL_MASK) && (st & GDK_SHIFT_MASK)) {
         switch (keyval) {
             case GDK_KEY_C:
-                vte_terminal_copy_clipboard_format(terminal, VTE_FORMAT_TEXT);
-                return TRUE; /* Event handled */
+                vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
+                return TRUE;
             case GDK_KEY_V:
-                vte_terminal_paste_clipboard(terminal);
-                return TRUE; /* Event handled */
-            case GDK_KEY_A:  /* Ctrl+Shift+A to copy the whole scrollback */
-                /* Select all the text in the terminal */
-                vte_terminal_select_all(terminal);
-                vte_terminal_copy_clipboard_format(terminal, VTE_FORMAT_TEXT);
-                return TRUE; /* Event handled */
-            default:
-                break;
+                vte_terminal_paste_clipboard(term);
+                return TRUE;
+            case GDK_KEY_A:
+                vte_terminal_select_all(term);
+                vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
+                return TRUE;
         }
     }
-    return FALSE; /* Propagate event further if not handled */
+    return FALSE;
 }
 
-static void on_window_resize(GtkWidget* widget, GdkRectangle* allocation, gpointer user_data) {
-    /* Optional: Handle terminal resizing here */
-    g_print("Window resized: %d x %d\n", allocation->width, allocation->height);
+static void on_child_exited(VteTerminal* term, gint status, gpointer data) {
+    if (debug_enabled)
+        g_print("Child exited, status=%d\n", status);
+    g_application_quit(G_APPLICATION(data));
 }
 
-static void on_app_activate(GApplication* app, gpointer user_data) {
-    /* Create a top-level window for our app */
-    GtkWidget* window = gtk_application_window_new(GTK_APPLICATION(app));
-    gtk_window_set_title(GTK_WINDOW(window), "1term");
-    gtk_window_set_default_size(GTK_WINDOW(window), 1200, 500);
+static void on_app_activate(GApplication* app, gpointer data) {
+    DPRINT("on_app_activate\n");
+    GtkWidget* win = gtk_application_window_new(GTK_APPLICATION(app));
+    gtk_window_set_title(GTK_WINDOW(win), "1term");
+    gtk_window_set_default_size(GTK_WINDOW(win), 1200, 500);
 
-    /* Add 10% transparency to the window */
-    gtk_widget_set_opacity(window, 0.9);  // 10% transparency
-
-    /* Create a scrolled window so we can scroll back in terminal history */
     GtkWidget* scroll = gtk_scrolled_window_new();
-    gtk_window_set_child(GTK_WINDOW(window), scroll);
+    gtk_window_set_child(GTK_WINDOW(win), scroll);
 
-    /* Create a new VTE terminal widget */
-    GtkWidget* terminal = vte_terminal_new();
+    GtkWidget* term = vte_terminal_new();
+    gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
 
-    /* Set the window icon */
-    gtk_window_set_icon_name(GTK_WINDOW(window), "1term");
+    PangoFontDescription* font = pango_font_description_from_string("Monospace 11");
+    vte_terminal_set_font(VTE_TERMINAL(term), font);
+    pango_font_description_free(font);
 
-    /* Set the font for the terminal */
-    PangoFontDescription* font_desc = pango_font_description_from_string("Monospace 11");
-    vte_terminal_set_font(VTE_TERMINAL(terminal), font_desc);
-    pango_font_description_free(font_desc);
+    vte_terminal_set_scrollback_lines(VTE_TERMINAL(term), 100000);
+    vte_terminal_set_scroll_on_output(VTE_TERMINAL(term), TRUE);
+    vte_terminal_set_scroll_on_keystroke(VTE_TERMINAL(term), TRUE);
+    vte_terminal_set_mouse_autohide(VTE_TERMINAL(term), TRUE);
 
-    /* Increase scrollback buffer size to 100,000 lines */
-    vte_terminal_set_scrollback_lines(VTE_TERMINAL(terminal), 100000);
-    vte_terminal_set_scroll_on_output(VTE_TERMINAL(terminal), TRUE);
-    vte_terminal_set_scroll_on_keystroke(VTE_TERMINAL(terminal), TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), term);
 
-    /* Enable mouse scrolling */
-    vte_terminal_set_mouse_autohide(VTE_TERMINAL(terminal), TRUE); /* Auto-hide mouse when not interacting */
+    const char* shell = vte_get_user_shell();
+    char* argv[] = {(char*)shell, NULL};
 
-    /* Add the terminal widget to the scrolled window */
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), terminal);
+    vte_terminal_spawn_async(VTE_TERMINAL(term), VTE_PTY_DEFAULT, NULL, argv, NULL, (GSpawnFlags)0, NULL, NULL, NULL,
+                             -1, NULL, (VteTerminalSpawnAsyncCallback)spawn_cb, NULL);
 
-    /* Spawn the user's default shell inside the terminal */
-    const char* default_shell = vte_get_user_shell();
-    char* argv[] = {(char*)default_shell, NULL};
+    GtkEventController* keyctl = gtk_event_controller_key_new();
+    g_signal_connect(keyctl, "key-pressed", G_CALLBACK(on_terminal_key_pressed), term);
+    gtk_widget_add_controller(term, keyctl);
 
-    vte_terminal_spawn_async(VTE_TERMINAL(terminal), VTE_PTY_DEFAULT, /* VtePtyFlags */
-                             NULL,                                    /* working directory, or NULL = current */
-                             argv,                                    /* argv for child */
-                             NULL,                                    /* child environment, or NULL = inherit */
-                             (GSpawnFlags)0,                          /* flags from GSpawnFlags */
-                             NULL,                                    /* child_setup */
-                             NULL,                                    /* child_setup_data */
-                             NULL,                                    /* GCancellable */
-                             -1,                                      /* timeout for spawning, or -1 = no timeout */
-                             NULL,                                    /* GCancellable */
-                             NULL,                                    /* async-ready-callback, or NULL */
-                             NULL                                     /* user_data for callback */
-    );
+    g_signal_connect(term, "notify::current-directory-uri", G_CALLBACK(on_working_directory_changed), win);
+    g_signal_connect(term, "notify::window-title", G_CALLBACK(on_vte_title_changed), win);
 
-    /*
-     * Create and attach a key event controller to the terminal
-     * for our custom copy/paste shortcuts.
-     */
-    GtkEventController* key_controller = gtk_event_controller_key_new();
-    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_terminal_key_pressed), terminal);
-    gtk_widget_add_controller(terminal, key_controller);
+    g_signal_connect(term, "child-exited", G_CALLBACK(on_child_exited), app);
 
-    /* Connect to window resize signal */
-    g_signal_connect(window, "notify::allocation", G_CALLBACK(on_window_resize), NULL);
+    gtk_window_present(GTK_WINDOW(win));
+}
 
-    /* Finally, present the window */
-    gtk_window_present(GTK_WINDOW(window));
+static void print_help(const char* prog) {
+    g_print("Usage: %s [OPTIONS]\n", prog);
+    g_print("  -D, --debug             Enable debug messages\n");
+    g_print("  -h, -H, --help          Show this help\n");
+}
+
+static int handle_local_options(GApplication* app, GVariantDict* opts, gpointer data) {
+    if (g_variant_dict_contains(opts, "help")) {
+        print_help(g_get_prgname());
+        return 0;
+    }
+    return -1;
 }
 
 int main(int argc, char** argv) {
-    /* Create our application */
-    GtkApplication* app;
-    int status;
-
-    app = gtk_application_new("org.example.vtegtk4", G_APPLICATION_DEFAULT_FLAGS);
-
-    /* Connect to the "activate" signal, emitted on g_application_run() */
+    GtkApplication* app = gtk_application_new("org.example.vtegtk4", G_APPLICATION_DEFAULT_FLAGS);
+    static GOptionEntry entries[] = {
+        {"debug", 'D', 0, G_OPTION_ARG_NONE, &debug_enabled, "Enable debug messages", NULL},
+        {"help", 'h', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, NULL, "Show help", NULL},
+        {NULL}};
+    g_application_add_main_option_entries(G_APPLICATION(app), entries);
+    g_signal_connect(app, "handle-local-options", G_CALLBACK(handle_local_options), NULL);
     g_signal_connect(app, "activate", G_CALLBACK(on_app_activate), NULL);
 
-    /* Run the application (enters the main event loop) */
-    status = g_application_run(G_APPLICATION(app), argc, argv);
-
+    int status = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);
     return status;
 }
