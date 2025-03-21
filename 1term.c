@@ -43,7 +43,10 @@ static void on_app_activate(GApplication* app, gpointer user_data) {
     /* Create a top-level window for our app */
     GtkWidget* window = gtk_application_window_new(GTK_APPLICATION(app));
     gtk_window_set_title(GTK_WINDOW(window), "1term");
-    gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
+    gtk_window_set_default_size(GTK_WINDOW(window), 1200, 500);
+
+    /* Add 10% transparency to the window */
+    gtk_widget_set_opacity(window, 0.9);  // 10% transparency
 
     /* Create a scrolled window so we can scroll back in terminal history */
     GtkWidget* scroll = gtk_scrolled_window_new();
