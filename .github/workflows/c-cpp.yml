@@ -36,6 +36,7 @@ jobs:
             libtool \
             meson \
             libgtk-4-dev \
+            libvte-2.91-gtk4-dev \
             pkg-config \
             valgrind \
             xvfb \
