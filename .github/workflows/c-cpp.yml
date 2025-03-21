@@ -35,6 +35,8 @@ jobs:
             gettext \
             libtool \
             meson \
+            libgtk-4-dev \
+            vte \
             pkg-config \
             valgrind \
             xvfb \
