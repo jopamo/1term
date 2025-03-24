@@ -145,16 +145,20 @@ static void on_app_activate(GApplication* app, gpointer data) {
     GtkWidget* term = vte_terminal_new();
     gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
 
-    PangoFontDescription* font = pango_font_description_from_string("Monospace 11");
+    PangoFontDescription* font = pango_font_description_from_string("Monospace 9");
     vte_terminal_set_font(VTE_TERMINAL(term), font);
     pango_font_description_free(font);
 
     vte_terminal_set_scrollback_lines(VTE_TERMINAL(term), 100000);
-    vte_terminal_set_scroll_on_output(VTE_TERMINAL(term), TRUE);
+    vte_terminal_set_scroll_on_output(VTE_TERMINAL(term), FALSE);
     vte_terminal_set_scroll_on_keystroke(VTE_TERMINAL(term), TRUE);
     vte_terminal_set_mouse_autohide(VTE_TERMINAL(term), TRUE);
 
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), term);
+
+    GdkRGBA bg_color;
+    gdk_rgba_parse(&bg_color, "rgba(0,0,0,0.9)");
+    vte_terminal_set_color_background(VTE_TERMINAL(term), &bg_color);
 
     const char* shell = vte_get_user_shell();
     char* argv[] = {(char*)shell, NULL};
@@ -189,7 +193,9 @@ static int handle_local_options(GApplication* app, GVariantDict* opts, gpointer 
 }
 
 int main(int argc, char** argv) {
-    GtkApplication* app = gtk_application_new("org.example.vtegtk4", G_APPLICATION_DEFAULT_FLAGS);
+    GtkApplication* app =
+        gtk_application_new("org.example.vtegtk4", G_APPLICATION_DEFAULT_FLAGS | G_APPLICATION_NON_UNIQUE);
+
     static GOptionEntry entries[] = {
         {"debug", 'D', 0, G_OPTION_ARG_NONE, &debug_enabled, "Enable debug messages", NULL},
         {"help", 'h', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, NULL, "Show help", NULL},
