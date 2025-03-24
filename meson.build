@@ -15,4 +15,4 @@ exe_1term = executable('1term',
 )
 
 install_data('1term.desktop', install_dir: join_paths(get_option('prefix'), 'share/applications'))
-install_data('1term.png', install_dir: join_paths(get_option('prefix'), 'share/pixmaps'))
+install_data('1term.png', install_dir: join_paths(get_option('prefix'), 'share/icons/hicolor/256x256/apps'))
