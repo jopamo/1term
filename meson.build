@@ -7,10 +7,11 @@ project('myproject', 'c',
 
 gtk_dep = dependency('gtk4')
 vte_dep = dependency('vte-2.91-gtk4')
+glib_dep = dependency('glib-2.0')
 
 exe_1term = executable('1term',
   '1term.c',
-  dependencies: [gtk_dep, vte_dep],
+  dependencies: [gtk_dep, vte_dep, glib_dep],
   install: true
 )
 
