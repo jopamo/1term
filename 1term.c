@@ -4,10 +4,16 @@
 #include <vte/vte.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <string.h>
+#include <unistd.h>
+#include <zstd.h>
 
-static gboolean debug_enabled = TRUE;
+static gboolean debug_enabled = FALSE;
+
+static void compress_entire_scrollback(VteTerminal* term);
 
 #define DPRINT(fmt, ...)                            \
     do {                                            \
@@ -17,6 +23,47 @@ static gboolean debug_enabled = TRUE;
 
 static GPid g_child_pid = -1;
 
+static void compress_text_zstd(const char* text, const char* outFilename, int compressionLevel) {
+    if (!text || !*text) {
+        g_printerr("Nothing to compress.\n");
+        return;
+    }
+
+    size_t srcSize = strlen(text);
+    size_t bound = ZSTD_compressBound(srcSize);
+
+    void* compressedData = malloc(bound);
+    if (!compressedData) {
+        g_printerr("Error: cannot allocate memory for compression.\n");
+        return;
+    }
+
+    size_t cSize = ZSTD_compress(compressedData, bound, text, srcSize, compressionLevel);
+    if (ZSTD_isError(cSize)) {
+        g_printerr("ZSTD_compress error: %s\n", ZSTD_getErrorName(cSize));
+        free(compressedData);
+        return;
+    }
+
+    FILE* fp = fopen(outFilename, "wb");
+    if (!fp) {
+        g_printerr("Error opening %s for writing: %s\n", outFilename, strerror(errno));
+        free(compressedData);
+        return;
+    }
+
+    size_t written = fwrite(compressedData, 1, cSize, fp);
+    fclose(fp);
+    free(compressedData);
+
+    if (written != cSize) {
+        g_printerr("Error writing all compressed bytes to %s.\n", outFilename);
+        return;
+    }
+
+    g_print("Successfully compressed scrollback to '%s' (%zu bytes)\n", outFilename, cSize);
+}
+
 static void on_vte_title_changed(VteTerminal* term, GParamSpec* pspec, gpointer user_data) {
     GtkWindow* win = GTK_WINDOW(user_data);
     gchar* title = NULL;
@@ -25,7 +72,7 @@ static void on_vte_title_changed(VteTerminal* term, GParamSpec* pspec, gpointer 
     if (title && *title) {
         const gchar* current_title = gtk_window_get_title(win);
         if (g_strcmp0(title, current_title) != 0) {
-            DPRINT("on_vte_title_changed: %s\n", title);
+            DPRINT("Title changed: %s\n", title);
             gtk_window_set_title(win, title);
         }
     }
@@ -47,7 +94,7 @@ static void on_working_directory_changed(GObject* obj, GParamSpec* pspec, gpoint
 
     if (cwd && g_strcmp0(cwd, last_cwd) != 0) {
         gchar* title = g_strdup_printf("Terminal: %s", cwd);
-        DPRINT("on_working_directory_changed: '%s'\n", title);
+        DPRINT("Working directory changed => %s\n", title);
         gtk_window_set_title(win, title);
         g_free(title);
 
@@ -69,6 +116,23 @@ static void spawn_cb(VteTerminal* term, GPid pid, GError* err, gpointer user_dat
     DPRINT("Shell spawned, PID=%d\n", (int)pid);
 }
 
+static int ensure_log_directory(void) {
+    const char* home = g_get_home_dir();
+    if (!home || !*home) {
+        g_printerr("Error: cannot determine home directory.\n");
+        return -1;
+    }
+
+    gchar* logsdir = g_build_filename(home, ".1term", "logs", NULL);
+    if (g_mkdir_with_parents(logsdir, 0700) != 0) {
+        g_printerr("Could not create directory %s: %s\n", logsdir, strerror(errno));
+        g_free(logsdir);
+        return -1;
+    }
+    g_free(logsdir);
+    return 0;
+}
+
 static gboolean on_terminal_key_pressed(GtkEventControllerKey* ctl,
                                         guint keyval,
                                         guint keycode,
@@ -79,18 +143,84 @@ static gboolean on_terminal_key_pressed(GtkEventControllerKey* ctl,
     if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK)) {
         switch (keyval) {
             case GDK_KEY_C:
+                DPRINT("Ctrl+Shift+C => copy\n");
                 vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
                 return TRUE;
+
             case GDK_KEY_V:
+                DPRINT("Ctrl+Shift+V => paste\n");
                 vte_terminal_paste_clipboard(term);
                 return TRUE;
+
             case GDK_KEY_A:
+                DPRINT("Ctrl+Shift+A => select all + copy\n");
                 vte_terminal_select_all(term);
                 vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
                 return TRUE;
+
+            case GDK_KEY_B:
+                DPRINT("Ctrl+Shift+B => compress entire scrollback\n");
+                compress_entire_scrollback(term);
+                return TRUE;
+
+            default:
+                break;
         }
     }
     return FALSE;
+}
+
+static void compress_entire_scrollback(VteTerminal* term) {
+    DPRINT("Entering compress_entire_scrollback()\n");
+
+    if (ensure_log_directory() != 0) {
+        DPRINT("ensure_log_directory() failed, aborting.\n");
+        return;
+    }
+
+    DPRINT("Calling vte_terminal_get_text_range_format()...\n");
+    gsize text_len = 0;
+    gchar* all_text = vte_terminal_get_text_range_format(term, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
+
+    if (!all_text || !*all_text) {
+        DPRINT("No text from get_text_range_format(), trying fallback...\n");
+        g_free(all_text);
+
+        all_text = vte_terminal_get_text(term, NULL, NULL, NULL);
+        if (!all_text || !*all_text) {
+            DPRINT("No text from fallback API either.\n");
+            g_free(all_text);
+            return;
+        }
+    }
+
+    DPRINT("Retrieved text of length=%zu\n", text_len);
+    if (!*all_text) {
+        DPRINT("All_text is empty (length=%zu). Nothing to compress.\n", text_len);
+        g_free(all_text);
+        return;
+    }
+
+    const char* home = g_get_home_dir();
+    gchar* logsdir = g_build_filename(home, ".1term", "logs", NULL);
+
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+
+    char timestr[64];
+    strftime(timestr, sizeof(timestr), "terminal_%Y%m%d_%H%M%S.logz", &tm_info);
+
+    gchar* outFilename = g_build_filename(logsdir, timestr, NULL);
+
+    DPRINT("Compressing text to '%s'...\n", outFilename);
+    compress_text_zstd(all_text, outFilename, 19);
+
+    g_free(all_text);
+    g_free(outFilename);
+    g_free(logsdir);
+
+    DPRINT("Exiting compress_entire_scrollback()\n");
 }
 
 static void on_child_exited(VteTerminal* term, gint status, gpointer user_data) {
@@ -141,7 +271,6 @@ static void on_app_activate(GApplication* app, gpointer user_data) {
     if (!shell || shell[0] == '\0') {
         shell = "/bin/sh";
     }
-
     char* argv[] = {(char*)shell, NULL};
 
     vte_terminal_spawn_async(term, VTE_PTY_DEFAULT, NULL, argv, NULL, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL,
@@ -153,7 +282,6 @@ static void on_app_activate(GApplication* app, gpointer user_data) {
 
     g_signal_connect(term, "notify::current-directory-uri", G_CALLBACK(on_working_directory_changed), win);
     g_signal_connect(term, "notify::window-title", G_CALLBACK(on_vte_title_changed), win);
-
     g_signal_connect(term, "child-exited", G_CALLBACK(on_child_exited), app);
 
     gtk_window_present(GTK_WINDOW(win));
