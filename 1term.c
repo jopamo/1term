@@ -2,207 +2,97 @@
 
 #include <gtk/gtk.h>
 #include <vte/vte.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <string.h>
-#include <unistd.h>
 #include <zstd.h>
 
-static gboolean debug_enabled = FALSE;
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
-static void compress_entire_scrollback(VteTerminal* term);
+#ifndef VTE_CHECK_VERSION
+#define VTE_CHECK_VERSION(maj, min, mic)                                                         \
+    ((VTE_MAJOR_VERSION > (maj)) || (VTE_MAJOR_VERSION == (maj) && VTE_MINOR_VERSION > (min)) || \
+     (VTE_MAJOR_VERSION == (maj) && VTE_MINOR_VERSION == (min) && VTE_MICRO_VERSION >= (mic)))
+#endif
 
-#define DPRINT(fmt, ...)                            \
-    do {                                            \
-        if (debug_enabled)                          \
-            g_print("[DEBUG] " fmt, ##__VA_ARGS__); \
-    } while (0)
+#if !VTE_CHECK_VERSION(0, 78, 0)
+#define TERM_SIGNAL_TITLE "window-title-changed"
+#define TERM_SIGNAL_CWD "current-directory-uri-changed"
+#else
+#define TERM_SIGNAL_TITLE "termprop-changed"
+#define TERM_SIGNAL_CWD "termprop-changed"
+#endif
 
-static GPid g_child_pid = -1;
+static void create_window(GtkApplication* app);
 
-static void compress_text_zstd(const char* text, const char* outFilename, int compressionLevel) {
-    if (!text || !*text) {
-        g_printerr("Nothing to compress.\n");
-        return;
+static GThreadPool* compress_pool = NULL;
+
+typedef struct {
+    gchar* text;
+    gchar* path;
+    int lvl;
+} CompressJob;
+
+static void compress_worker(gpointer data, gpointer unused) {
+    CompressJob* j = data;
+    const size_t src_len = strlen(j->text);
+    const size_t cap = ZSTD_compressBound(src_len);
+
+    void* buf = malloc(cap);
+    if (!buf)
+        goto done;
+
+    size_t compressed_size = ZSTD_compress(buf, cap, j->text, src_len, j->lvl);
+    if (ZSTD_isError(compressed_size)) {
+        g_printerr("zstd: %s\n", ZSTD_getErrorName(compressed_size));
+        free(buf);
+        goto done;
     }
 
-    size_t srcSize = strlen(text);
-    size_t bound = ZSTD_compressBound(srcSize);
-
-    void* compressedData = malloc(bound);
-    if (!compressedData) {
-        g_printerr("Error: cannot allocate memory for compression.\n");
-        return;
+    FILE* f = fopen(j->path, "wb");
+    if (!f) {
+        g_printerr("%s: %s\n", j->path, g_strerror(errno));
+        free(buf);
+        goto done;
     }
 
-    size_t cSize = ZSTD_compress(compressedData, bound, text, srcSize, compressionLevel);
-    if (ZSTD_isError(cSize)) {
-        g_printerr("ZSTD_compress error: %s\n", ZSTD_getErrorName(cSize));
-        free(compressedData);
-        return;
-    }
+    fwrite(buf, 1, compressed_size, f);
+    fclose(f);
+    free(buf);
 
-    FILE* fp = fopen(outFilename, "wb");
-    if (!fp) {
-        g_printerr("Error opening %s for writing: %s\n", outFilename, strerror(errno));
-        free(compressedData);
-        return;
-    }
+    g_print("Scroll-back compressed → %s (%zu B)\n", j->path, compressed_size);
 
-    size_t written = fwrite(compressedData, 1, cSize, fp);
-    fclose(fp);
-    free(compressedData);
-
-    if (written != cSize) {
-        g_printerr("Error writing all compressed bytes to %s.\n", outFilename);
-        return;
-    }
-
-    g_print("Successfully compressed scrollback to '%s' (%zu bytes)\n", outFilename, cSize);
+done:
+    g_free(j->text);
+    g_free(j->path);
+    g_free(j);
 }
 
-static void on_vte_title_changed(VteTerminal* term, GParamSpec* pspec, gpointer user_data) {
-    GtkWindow* win = GTK_WINDOW(user_data);
-    gchar* title = NULL;
-
-    g_object_get(term, "window-title", &title, NULL);
-    if (title && *title) {
-        const gchar* current_title = gtk_window_get_title(win);
-        if (g_strcmp0(title, current_title) != 0) {
-            DPRINT("Title changed: %s\n", title);
-            gtk_window_set_title(win, title);
-        }
-    }
-    g_free(title);
-}
-
-static void on_working_directory_changed(GObject* obj, GParamSpec* pspec, gpointer user_data) {
-    GtkWindow* win = GTK_WINDOW(user_data);
-    gchar* uri = NULL;
-    g_object_get(obj, "current-directory-uri", &uri, NULL);
-    if (!uri) {
-        DPRINT("No current-directory-uri found.\n");
-        return;
-    }
-
-    static gchar* last_cwd = NULL;
-    gchar* cwd = g_filename_from_uri(uri, NULL, NULL);
-    g_free(uri);
-
-    if (cwd && g_strcmp0(cwd, last_cwd) != 0) {
-        gchar* title = g_strdup_printf("Terminal: %s", cwd);
-        DPRINT("Working directory changed => %s\n", title);
-        gtk_window_set_title(win, title);
-        g_free(title);
-
-        g_free(last_cwd);
-        last_cwd = cwd;
-    }
-    else {
-        g_free(cwd);
-    }
-}
-
-static void spawn_cb(VteTerminal* term, GPid pid, GError* err, gpointer user_data) {
-    if (err) {
-        g_printerr("Error spawning child: %s\n", err->message);
-        g_clear_error(&err);
-        return;
-    }
-    g_child_pid = pid;
-    DPRINT("Shell spawned, PID=%d\n", (int)pid);
-}
-
-static int ensure_log_directory(void) {
-    const char* home = g_get_home_dir();
-    if (!home || !*home) {
-        g_printerr("Error: cannot determine home directory.\n");
-        return -1;
-    }
-
-    gchar* logsdir = g_build_filename(home, ".1term", "logs", NULL);
-    if (g_mkdir_with_parents(logsdir, 0700) != 0) {
-        g_printerr("Could not create directory %s: %s\n", logsdir, strerror(errno));
-        g_free(logsdir);
-        return -1;
-    }
-    g_free(logsdir);
-    return 0;
-}
-
-static gboolean on_terminal_key_pressed(GtkEventControllerKey* ctl,
-                                        guint keyval,
-                                        guint keycode,
-                                        GdkModifierType state,
-                                        gpointer user_data) {
-    VteTerminal* term = VTE_TERMINAL(user_data);
-
-    if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK)) {
-        switch (keyval) {
-            case GDK_KEY_C:
-                DPRINT("Ctrl+Shift+C => copy\n");
-                vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
-                return TRUE;
-
-            case GDK_KEY_V:
-                DPRINT("Ctrl+Shift+V => paste\n");
-                vte_terminal_paste_clipboard(term);
-                return TRUE;
-
-            case GDK_KEY_A:
-                DPRINT("Ctrl+Shift+A => select all + copy\n");
-                vte_terminal_select_all(term);
-                vte_terminal_copy_clipboard_format(term, VTE_FORMAT_TEXT);
-                return TRUE;
-
-            case GDK_KEY_B:
-                DPRINT("Ctrl+Shift+B => compress entire scrollback\n");
-                compress_entire_scrollback(term);
-                return TRUE;
-
-            default:
-                break;
-        }
-    }
-    return FALSE;
-}
-
-static void compress_entire_scrollback(VteTerminal* term) {
-    DPRINT("Entering compress_entire_scrollback()\n");
-
-    if (ensure_log_directory() != 0) {
-        DPRINT("ensure_log_directory() failed, aborting.\n");
-        return;
-    }
-
-    DPRINT("Calling vte_terminal_get_text_range_format()...\n");
+static void compress_scrollback_async(VteTerminal* vt) {
     gsize text_len = 0;
-    gchar* all_text = vte_terminal_get_text_range_format(term, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
+    gchar* txt = vte_terminal_get_text_range_format(vt, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
 
-    if (!all_text || !*all_text) {
-        DPRINT("No text from get_text_range_format(), trying fallback...\n");
-        g_free(all_text);
-
-        all_text = vte_terminal_get_text(term, NULL, NULL, NULL);
-        if (!all_text || !*all_text) {
-            DPRINT("No text from fallback API either.\n");
-            g_free(all_text);
+    if (!txt || !*txt) {
+        g_free(txt);
+        txt = vte_terminal_get_text(vt, NULL, NULL, NULL);
+        if (!txt || !*txt) {
+            g_free(txt);
             return;
         }
     }
 
-    DPRINT("Retrieved text of length=%zu\n", text_len);
-    if (!*all_text) {
-        DPRINT("All_text is empty (length=%zu). Nothing to compress.\n", text_len);
-        g_free(all_text);
+    gchar* dir = g_build_filename(g_get_home_dir(), ".1term", "logs", NULL);
+    if (g_mkdir_with_parents(dir, 0700) != 0) {
+        g_printerr("mkdir %s: %s\n", dir, g_strerror(errno));
+        g_free(txt);
+        g_free(dir);
         return;
     }
-
-    const char* home = g_get_home_dir();
-    gchar* logsdir = g_build_filename(home, ".1term", "logs", NULL);
 
     time_t now = time(NULL);
     struct tm tm_info;
@@ -211,96 +101,200 @@ static void compress_entire_scrollback(VteTerminal* term) {
     char timestr[64];
     strftime(timestr, sizeof(timestr), "terminal_%Y%m%d_%H%M%S.logz", &tm_info);
 
-    gchar* outFilename = g_build_filename(logsdir, timestr, NULL);
+    gchar* path = g_build_filename(dir, timestr, NULL);
+    g_free(dir);
 
-    DPRINT("Compressing text to '%s'...\n", outFilename);
-    compress_text_zstd(all_text, outFilename, 19);
+    CompressJob* j = g_new0(CompressJob, 1);
+    j->text = txt;
+    j->path = path;
+    j->lvl = 19;
 
-    g_free(all_text);
-    g_free(outFilename);
-    g_free(logsdir);
-
-    DPRINT("Exiting compress_entire_scrollback()\n");
+    g_thread_pool_push(compress_pool, j, NULL);
 }
 
-static void on_child_exited(VteTerminal* term, gint status, gpointer user_data) {
-    if (debug_enabled) {
-        g_print("Child exited, status=%d\n", status);
+static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
+                               guint keyval,
+                               guint keycode,
+                               GdkModifierType state,
+                               gpointer user_data) {
+    VteTerminal* vt = VTE_TERMINAL(user_data);
+
+    if ((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) {
+        switch (keyval) {
+            case GDK_KEY_C:
+                vte_terminal_copy_clipboard_format(vt, VTE_FORMAT_TEXT);
+                return TRUE;
+            case GDK_KEY_V:
+                vte_terminal_paste_clipboard(vt);
+                return TRUE;
+            case GDK_KEY_A:
+                vte_terminal_select_all(vt);
+                vte_terminal_copy_clipboard_format(vt, VTE_FORMAT_TEXT);
+                return TRUE;
+            case GDK_KEY_B:
+
+                compress_scrollback_async(vt);
+                return TRUE;
+        }
     }
-    g_application_quit(G_APPLICATION(user_data));
+    return FALSE;
 }
 
-static void print_help(const char* prog) {
-    g_print("Usage: %s [OPTIONS]\n", prog);
-    g_print("  -D, --debug          Enable debug messages\n");
-    g_print("  -h, -H, --help       Show this help\n");
-}
+static void update_title(VteTerminal* vt, GtkWindow* win) {
+    gsize len = 0;
 
-static int handle_local_options(GApplication* app, GVariantDict* opts, gpointer user_data) {
-    if (g_variant_dict_contains(opts, "help")) {
-        print_help(g_get_prgname());
-        return 0;
+#if VTE_CHECK_VERSION(0, 78, 0)
+    const char* shell_title = vte_terminal_get_termprop_string(vt, VTE_TERMPROP_XTERM_TITLE, &len);
+    g_autoptr(GUri) cwd_uri = vte_terminal_ref_termprop_uri(vt, VTE_TERMPROP_CURRENT_DIRECTORY_URI);
+#else
+    const char* shell_title = vte_terminal_get_window_title(vt);
+    const char* cwd_uri_str = vte_terminal_get_current_directory_uri(vt);
+    g_autoptr(GUri) cwd_uri = NULL;
+    if (cwd_uri_str)
+        cwd_uri = g_uri_parse(cwd_uri_str, G_URI_FLAGS_NONE, NULL);
+#endif
+
+    if (shell_title && *shell_title) {
+        gtk_window_set_title(win, shell_title);
+        return;
     }
-    return -1;
+
+    if (cwd_uri) {
+        const char* scheme = g_uri_get_scheme(cwd_uri);
+        if (scheme && g_str_equal(scheme, "file")) {
+            const char* path = g_uri_get_path(cwd_uri);
+            if (path && *path) {
+                g_autofree char* s = g_strdup_printf("%s@%s", g_get_user_name(), path);
+                gtk_window_set_title(win, s);
+                return;
+            }
+        }
+    }
+
+    g_autofree char* s = g_strdup_printf("%s@?", g_get_user_name());
+    gtk_window_set_title(win, s);
 }
 
-static void on_app_activate(GApplication* app, gpointer user_data) {
-    GtkWidget* win = gtk_application_window_new(GTK_APPLICATION(app));
-    gtk_window_set_title(GTK_WINDOW(win), "1term");
-    gtk_window_set_default_size(GTK_WINDOW(win), 1200, 500);
+static void title_sig_cb(VteTerminal* vt, guint prop_id, gpointer win) {
+    (void)prop_id;
+    update_title(vt, GTK_WINDOW(win));
+}
 
-    GtkWidget* scroll = gtk_scrolled_window_new();
-    gtk_window_set_child(GTK_WINDOW(win), scroll);
+static void on_child_exit(VteTerminal* vt, int status, GtkWindow* win) {
+    g_print("Shell exited (status=%d). Closing window.\n", status);
+    gtk_window_destroy(win);
+}
 
-    VteTerminal* term = VTE_TERMINAL(vte_terminal_new());
+G_DECLARE_FINAL_TYPE(MyWindow, my_window, MY, WINDOW, GtkApplicationWindow)
+struct _MyWindow {
+    GtkApplicationWindow parent_instance;
+};
+G_DEFINE_TYPE(MyWindow, my_window, GTK_TYPE_APPLICATION_WINDOW)
+
+static void my_window_css_changed(GtkWidget* w, GtkCssStyleChange* c) {
+    GTK_WIDGET_CLASS(my_window_parent_class)->css_changed(w, c);
+}
+static void my_window_class_init(MyWindowClass* klass) {
+    GTK_WIDGET_CLASS(klass)->css_changed = my_window_css_changed;
+}
+static void my_window_init(MyWindow* self) {}
+
+static GtkWidget* my_window_new(GtkApplication* app) {
+    return g_object_new(my_window_get_type(), "application", app, NULL);
+}
+
+static void create_window(GtkApplication* app) {
+    GtkWidget* win = my_window_new(app);
+    VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
+
+    gtk_window_set_default_size(GTK_WINDOW(win), 1200, 600);
     gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
 
-    PangoFontDescription* font = pango_font_description_from_string("Monospace 9");
-    vte_terminal_set_font(term, font);
-    pango_font_description_free(font);
+    static const char css[] =
+        "window{background-color:rgba(0,0,0,0);} "
+        "vte-terminal{background-color:rgba(0,0,0,0);}";
+    GtkCssProvider* prov = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(prov, css, -1);
+    gtk_style_context_add_provider_for_display(gtk_widget_get_display(win), GTK_STYLE_PROVIDER(prov),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(prov);
 
-    vte_terminal_set_scrollback_lines(term, 100000);
-    vte_terminal_set_scroll_on_output(term, FALSE);
-    vte_terminal_set_scroll_on_keystroke(term, TRUE);
-    vte_terminal_set_mouse_autohide(term, TRUE);
-    vte_terminal_set_enable_fallback_scrolling(term, FALSE);
+    GtkWidget* scr = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(vt));
+    gtk_window_set_child(GTK_WINDOW(win), scr);
 
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(term));
+    PangoFontDescription* fd = pango_font_description_from_string("Monospace 9");
+    vte_terminal_set_font(vt, fd);
+    pango_font_description_free(fd);
+
+    vte_terminal_set_scrollback_lines(vt, 100000);
+    vte_terminal_set_scroll_on_output(vt, FALSE);
+    vte_terminal_set_scroll_on_keystroke(vt, TRUE);
+
+#if VTE_CHECK_VERSION(0, 78, 0)
+    vte_terminal_set_enable_a11y(vt, FALSE);
+#endif
+    vte_terminal_set_enable_bidi(vt, FALSE);
+    vte_terminal_set_enable_shaping(vt, FALSE);
+    vte_terminal_set_enable_sixel(vt, FALSE);
+    vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
+    vte_terminal_set_audible_bell(vt, FALSE);
+
+    GdkRGBA bg = {0, 0, 0, 0.80};
+    vte_terminal_set_color_background(vt, &bg);
 
     const char* shell = vte_get_user_shell();
-    if (!shell || shell[0] == '\0') {
+    if (!shell || !*shell)
         shell = "/bin/sh";
-    }
+
     char* argv[] = {(char*)shell, NULL};
+    char** envp = g_environ_setenv(g_get_environ(), "TERM", "xterm-256color", TRUE);
 
-    vte_terminal_spawn_async(term, VTE_PTY_DEFAULT, NULL, argv, NULL, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL,
-                             spawn_cb, NULL);
+    vte_terminal_spawn_async(vt, VTE_PTY_DEFAULT, NULL, argv, envp, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL, NULL,
+                             NULL);
+    g_strfreev(envp);
 
-    GtkEventController* keyctl = gtk_event_controller_key_new();
-    g_signal_connect(keyctl, "key-pressed", G_CALLBACK(on_terminal_key_pressed), term);
-    gtk_widget_add_controller(GTK_WIDGET(term), keyctl);
+    g_signal_connect(vt, "child-exited", G_CALLBACK(on_child_exit), win);
 
-    g_signal_connect(term, "notify::current-directory-uri", G_CALLBACK(on_working_directory_changed), win);
-    g_signal_connect(term, "notify::window-title", G_CALLBACK(on_vte_title_changed), win);
-    g_signal_connect(term, "child-exited", G_CALLBACK(on_child_exited), app);
+#if VTE_CHECK_VERSION(0, 78, 0)
+    g_signal_connect(vt, "termprop-changed", G_CALLBACK(title_sig_cb), win);
+#else
+    g_signal_connect(vt, "window-title-changed", G_CALLBACK(title_sig_cb), win);
+    g_signal_connect(vt, "current-directory-uri-changed", G_CALLBACK(title_sig_cb), win);
+#endif
 
+    GtkEventController* keys = gtk_event_controller_key_new();
+    g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), vt);
+    gtk_widget_add_controller(GTK_WIDGET(vt), keys);
+
+    update_title(vt, GTK_WINDOW(win));
     gtk_window_present(GTK_WINDOW(win));
 }
 
+static void new_window_action(GSimpleAction* a, GVariant* p, gpointer u) {
+    create_window(GTK_APPLICATION(u));
+}
+
+static void app_activate(GApplication* gapp, gpointer unused) {
+    create_window(GTK_APPLICATION(gapp));
+}
+
 int main(int argc, char** argv) {
-    GtkApplication* app =
-        gtk_application_new("org.example.vtegtk4", G_APPLICATION_DEFAULT_FLAGS | G_APPLICATION_NON_UNIQUE);
+    compress_pool = g_thread_pool_new(compress_worker, NULL, g_get_num_processors(), FALSE, NULL);
 
-    static GOptionEntry entries[] = {
-        {"debug", 'D', 0, G_OPTION_ARG_NONE, &debug_enabled, "Enable debug messages", NULL},
-        {"help", 'h', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, NULL, "Show help", NULL},
-        {NULL}};
+    GtkApplication* app = gtk_application_new("com.example.oneterm", G_APPLICATION_NON_UNIQUE);
 
-    g_application_add_main_option_entries(G_APPLICATION(app), entries);
-    g_signal_connect(app, "handle-local-options", G_CALLBACK(handle_local_options), NULL);
-    g_signal_connect(app, "activate", G_CALLBACK(on_app_activate), NULL);
+    g_signal_connect(app, "activate", G_CALLBACK(app_activate), NULL);
+
+    GSimpleAction* act = g_simple_action_new("new-window", NULL);
+    g_signal_connect(act, "activate", G_CALLBACK(new_window_action), app);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(act));
 
     int status = g_application_run(G_APPLICATION(app), argc, argv);
+
     g_object_unref(app);
+
+    g_thread_pool_free(compress_pool, TRUE, TRUE);
     return status;
 }
