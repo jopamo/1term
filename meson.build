@@ -2,7 +2,7 @@ project('myproject', 'c',
   version: '0.1.0',
 
   default_options : [
-    'c_std=c23',          # keep the language level
+    'c_std=c2x',          # keep the language level
     'optimization=3',     # -O3   (Meson levels: 0/g/1/2/3/s/z)
     'b_lto=true',         # -flto (link-time optimisation, thin LTO if Clang)
     'b_pie=true',         # position-independent executable
