@@ -38,6 +38,9 @@ typedef struct {
     int lvl;
 } CompressJob;
 
+static gboolean transparency_enabled = TRUE;
+static gboolean scrollback_enabled = TRUE;
+
 static void compress_worker(gpointer data, gpointer unused) {
     CompressJob* j = data;
     const size_t src_len = strlen(j->text);
@@ -75,11 +78,20 @@ done:
 
 static void compress_scrollback_async(VteTerminal* vt) {
     gsize text_len = 0;
-    gchar* txt = vte_terminal_get_text_range_format(vt, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
 
+    gchar* txt = vte_terminal_get_text_range_format(vt, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
     if (!txt || !*txt) {
         g_free(txt);
+
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
         txt = vte_terminal_get_text(vt, NULL, NULL, NULL);
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+
         if (!txt || !*txt) {
             g_free(txt);
             return;
@@ -104,12 +116,12 @@ static void compress_scrollback_async(VteTerminal* vt) {
     gchar* path = g_build_filename(dir, timestr, NULL);
     g_free(dir);
 
-    CompressJob* j = g_new0(CompressJob, 1);
-    j->text = txt;
-    j->path = path;
-    j->lvl = 19;
+    CompressJob* job = g_new0(CompressJob, 1);
+    job->text = txt;
+    job->path = path;
+    job->lvl = 19;
 
-    g_thread_pool_push(compress_pool, j, NULL);
+    g_thread_pool_push(compress_pool, job, NULL);
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
@@ -132,9 +144,27 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
                 vte_terminal_copy_clipboard_format(vt, VTE_FORMAT_TEXT);
                 return TRUE;
             case GDK_KEY_B:
-
                 compress_scrollback_async(vt);
                 return TRUE;
+
+            case GDK_KEY_T: {
+                transparency_enabled = !transparency_enabled;
+                GdkRGBA newbg;
+                newbg.red = 0.0;
+                newbg.green = 0.0;
+                newbg.blue = 0.0;
+
+                newbg.alpha = transparency_enabled ? 0.8 : 1.0;
+                vte_terminal_set_color_background(vt, &newbg);
+                return TRUE;
+            }
+
+            case GDK_KEY_S: {
+                scrollback_enabled = !scrollback_enabled;
+
+                vte_terminal_set_scrollback_lines(vt, scrollback_enabled ? 100000 : 0);
+                return TRUE;
+            }
         }
     }
     return FALSE;
@@ -175,9 +205,9 @@ static void update_title(VteTerminal* vt, GtkWindow* win) {
     gtk_window_set_title(win, s);
 }
 
-static void title_sig_cb(VteTerminal* vt, guint prop_id, gpointer win) {
+static void title_sig_cb(VteTerminal* vt, guint prop_id, gpointer user_data) {
     (void)prop_id;
-    update_title(vt, GTK_WINDOW(win));
+    update_title(vt, GTK_WINDOW(user_data));
 }
 
 static void on_child_exit(VteTerminal* vt, int status, GtkWindow* win) {
@@ -194,13 +224,33 @@ G_DEFINE_TYPE(MyWindow, my_window, GTK_TYPE_APPLICATION_WINDOW)
 static void my_window_css_changed(GtkWidget* w, GtkCssStyleChange* c) {
     GTK_WIDGET_CLASS(my_window_parent_class)->css_changed(w, c);
 }
+
 static void my_window_class_init(MyWindowClass* klass) {
     GTK_WIDGET_CLASS(klass)->css_changed = my_window_css_changed;
 }
+
 static void my_window_init(MyWindow* self) {}
 
 static GtkWidget* my_window_new(GtkApplication* app) {
     return g_object_new(my_window_get_type(), "application", app, NULL);
+}
+
+static void spawn_finished_cb(GObject* source_object, GAsyncResult* res, gpointer user_data) {
+    VtePty* pty = VTE_PTY(source_object);
+    VteTerminal* vt = VTE_TERMINAL(user_data);
+    GPid child_pid = 0;
+    GError* error = NULL;
+
+    gboolean success = vte_pty_spawn_finish(pty, res, &child_pid, &error);
+    if (!success || child_pid <= 0) {
+        g_printerr("Error spawning shell: %s\n", (error ? error->message : "(unknown)"));
+        g_clear_error(&error);
+        return;
+    }
+
+    g_print("Spawned shell (PID=%d)\n", (int)child_pid);
+
+    vte_terminal_watch_child(vt, child_pid);
 }
 
 static void create_window(GtkApplication* app) {
@@ -213,11 +263,21 @@ static void create_window(GtkApplication* app) {
     static const char css[] =
         "window{background-color:rgba(0,0,0,0);} "
         "vte-terminal{background-color:rgba(0,0,0,0);}";
-    GtkCssProvider* prov = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(prov, css, -1);
-    gtk_style_context_add_provider_for_display(gtk_widget_get_display(win), GTK_STYLE_PROVIDER(prov),
-                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_unref(prov);
+
+    {
+        GtkCssProvider* prov = gtk_css_provider_new();
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+        gtk_css_provider_load_from_data(prov, css, -1);
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+        gtk_style_context_add_provider_for_display(gtk_widget_get_display(win), GTK_STYLE_PROVIDER(prov),
+                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(prov);
+    }
 
     GtkWidget* scr = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -228,10 +288,9 @@ static void create_window(GtkApplication* app) {
     vte_terminal_set_font(vt, fd);
     pango_font_description_free(fd);
 
-    vte_terminal_set_scrollback_lines(vt, 100000);
+    vte_terminal_set_scrollback_lines(vt, scrollback_enabled ? 100000 : 0);
     vte_terminal_set_scroll_on_output(vt, FALSE);
     vte_terminal_set_scroll_on_keystroke(vt, TRUE);
-
 #if VTE_CHECK_VERSION(0, 78, 0)
     vte_terminal_set_enable_a11y(vt, FALSE);
 #endif
@@ -241,7 +300,7 @@ static void create_window(GtkApplication* app) {
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
 
-    GdkRGBA bg = {0, 0, 0, 0.80};
+    GdkRGBA bg = {0, 0, 0, transparency_enabled ? 0.80 : 1.0};
     vte_terminal_set_color_background(vt, &bg);
 
     const char* shell = vte_get_user_shell();
@@ -251,9 +310,21 @@ static void create_window(GtkApplication* app) {
     char* argv[] = {(char*)shell, NULL};
     char** envp = g_environ_setenv(g_get_environ(), "TERM", "xterm-256color", TRUE);
 
-    vte_terminal_spawn_async(vt, VTE_PTY_DEFAULT, NULL, argv, envp, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL, NULL,
-                             NULL);
+    GError* err = NULL;
+    VtePty* pty = vte_pty_new_sync(VTE_PTY_DEFAULT, NULL, &err);
+    if (!pty) {
+        g_printerr("Failed to create PTY: %s\n", err ? err->message : "(unknown error)");
+        g_clear_error(&err);
+        g_strfreev(envp);
+        return;
+    }
+
+    vte_terminal_set_pty(vt, pty);
+
+    vte_pty_spawn_async(pty, NULL, argv, envp, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL, spawn_finished_cb, vt);
+
     g_strfreev(envp);
+    g_object_unref(pty);
 
     g_signal_connect(vt, "child-exited", G_CALLBACK(on_child_exit), win);
 
@@ -269,11 +340,12 @@ static void create_window(GtkApplication* app) {
     gtk_widget_add_controller(GTK_WIDGET(vt), keys);
 
     update_title(vt, GTK_WINDOW(win));
+
     gtk_window_present(GTK_WINDOW(win));
 }
 
-static void new_window_action(GSimpleAction* a, GVariant* p, gpointer u) {
-    create_window(GTK_APPLICATION(u));
+static void new_window_action(GSimpleAction* a, GVariant* p, gpointer user_data) {
+    create_window(GTK_APPLICATION(user_data));
 }
 
 static void app_activate(GApplication* gapp, gpointer unused) {
@@ -294,7 +366,7 @@ int main(int argc, char** argv) {
     int status = g_application_run(G_APPLICATION(app), argc, argv);
 
     g_object_unref(app);
-
     g_thread_pool_free(compress_pool, TRUE, TRUE);
+
     return status;
 }
