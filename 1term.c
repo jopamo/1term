@@ -300,7 +300,7 @@ static void create_window(GtkApplication* app) {
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
 
-    GdkRGBA bg = {0, 0, 0, transparency_enabled ? 0.90 : 1.0};
+    GdkRGBA bg = {0, 0, 0, transparency_enabled ? 0.95 : 1.0};
     vte_terminal_set_color_background(vt, &bg);
 
     const char* shell = vte_get_user_shell();
