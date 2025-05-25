@@ -82,7 +82,6 @@ static void compress_scrollback_async(VteTerminal* vt) {
     gchar* txt = vte_terminal_get_text_range_format(vt, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
     if (!txt || !*txt) {
         g_free(txt);
-
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -91,7 +90,6 @@ static void compress_scrollback_async(VteTerminal* vt) {
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
-
         if (!txt || !*txt) {
             g_free(txt);
             return;
@@ -121,6 +119,9 @@ static void compress_scrollback_async(VteTerminal* vt) {
     job->path = path;
     job->lvl = 19;
 
+    if (!compress_pool) {
+        compress_pool = g_thread_pool_new(compress_worker, NULL, g_get_num_processors(), FALSE, NULL);
+    }
     g_thread_pool_push(compress_pool, job, NULL);
 }
 
@@ -257,7 +258,20 @@ static void create_window(GtkApplication* app) {
     GtkWidget* win = my_window_new(app);
     VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
 
-    gtk_window_set_default_size(GTK_WINDOW(win), 1200, 600);
+    GdkDisplay* display = gtk_widget_get_display(win);
+    GListModel* monitors = gdk_display_get_monitors(display);
+    GdkMonitor* monitor = g_list_model_get_item(monitors, 0);
+    GdkRectangle geometry;
+    gdk_monitor_get_geometry(monitor, &geometry);
+    g_object_unref(monitor);
+
+    int border_correction = 8;
+    int width = geometry.width / 2 - border_correction;
+    if (width < 100)
+        width = 100;
+    int height = geometry.height / 5;
+    gtk_window_set_default_size(GTK_WINDOW(win), width, height);
+
     gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
 
     static const char css[] =
@@ -339,9 +353,9 @@ static void create_window(GtkApplication* app) {
     g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), vt);
     gtk_widget_add_controller(GTK_WIDGET(vt), keys);
 
-    update_title(vt, GTK_WINDOW(win));
-
     gtk_window_present(GTK_WINDOW(win));
+
+    update_title(vt, GTK_WINDOW(win));
 }
 
 static void new_window_action(GSimpleAction* a, GVariant* p, gpointer user_data) {
@@ -352,8 +366,15 @@ static void app_activate(GApplication* gapp, gpointer unused) {
     create_window(GTK_APPLICATION(gapp));
 }
 
+static void free_compress_pool(void) {
+    if (compress_pool) {
+        g_thread_pool_free(compress_pool, TRUE, TRUE);
+        compress_pool = NULL;
+    }
+}
+
 int main(int argc, char** argv) {
-    compress_pool = g_thread_pool_new(compress_worker, NULL, g_get_num_processors(), FALSE, NULL);
+    atexit(free_compress_pool);
 
     GtkApplication* app = gtk_application_new("com.example.oneterm", G_APPLICATION_NON_UNIQUE);
 
@@ -366,7 +387,6 @@ int main(int argc, char** argv) {
     int status = g_application_run(G_APPLICATION(app), argc, argv);
 
     g_object_unref(app);
-    g_thread_pool_free(compress_pool, TRUE, TRUE);
 
     return status;
 }
