@@ -28,6 +28,8 @@
 #define TERM_SIGNAL_CWD "termprop-changed"
 #endif
 
+static int window_count = 0;
+
 static void create_window(GtkApplication* app);
 
 static GThreadPool* compress_pool = NULL;
@@ -255,6 +257,8 @@ static void spawn_finished_cb(GObject* source_object, GAsyncResult* res, gpointe
 }
 
 static void create_window(GtkApplication* app) {
+    static int window_count = 0;
+
     GtkWidget* win = my_window_new(app);
     VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
 
@@ -266,11 +270,16 @@ static void create_window(GtkApplication* app) {
     g_object_unref(monitor);
 
     int border_correction = 8;
-    int width = geometry.width / 2 - border_correction;
-    if (width < 100)
-        width = 100;
-    int height = geometry.height / 5;
+
+    int width = geometry.width / 2 - border_correction - window_count * 20;
+    int height = geometry.height / 5 - window_count * 10;
+    if (width < 150)
+        width = 150;
+    if (height < 80)
+        height = 80;
+
     gtk_window_set_default_size(GTK_WINDOW(win), width, height);
+    window_count++;
 
     gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
 
@@ -354,7 +363,6 @@ static void create_window(GtkApplication* app) {
     gtk_widget_add_controller(GTK_WIDGET(vt), keys);
 
     gtk_window_present(GTK_WINDOW(win));
-
     update_title(vt, GTK_WINDOW(win));
 }
 
