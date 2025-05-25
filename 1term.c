@@ -28,8 +28,6 @@
 #define TERM_SIGNAL_CWD "termprop-changed"
 #endif
 
-static int window_count = 0;
-
 static void create_window(GtkApplication* app);
 
 static GThreadPool* compress_pool = NULL;
@@ -256,12 +254,7 @@ static void spawn_finished_cb(GObject* source_object, GAsyncResult* res, gpointe
     vte_terminal_watch_child(vt, child_pid);
 }
 
-static void create_window(GtkApplication* app) {
-    static int window_count = 0;
-
-    GtkWidget* win = my_window_new(app);
-    VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
-
+static void setup_window_size(GtkWidget* win, int window_count) {
     GdkDisplay* display = gtk_widget_get_display(win);
     GListModel* monitors = gdk_display_get_monitors(display);
     GdkMonitor* monitor = g_list_model_get_item(monitors, 0);
@@ -279,34 +272,28 @@ static void create_window(GtkApplication* app) {
         height = 80;
 
     gtk_window_set_default_size(GTK_WINDOW(win), width, height);
-    window_count++;
+}
 
-    gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
-
+static void apply_css(GtkWidget* win) {
     static const char css[] =
         "window{background-color:rgba(0,0,0,0);} "
         "vte-terminal{background-color:rgba(0,0,0,0);}";
 
-    {
-        GtkCssProvider* prov = gtk_css_provider_new();
+    GtkCssProvider* prov = gtk_css_provider_new();
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
-        gtk_css_provider_load_from_data(prov, css, -1);
+    gtk_css_provider_load_from_data(prov, css, -1);
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
-        gtk_style_context_add_provider_for_display(gtk_widget_get_display(win), GTK_STYLE_PROVIDER(prov),
-                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(prov);
-    }
+    gtk_style_context_add_provider_for_display(gtk_widget_get_display(win), GTK_STYLE_PROVIDER(prov),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(prov);
+}
 
-    GtkWidget* scr = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(vt));
-    gtk_window_set_child(GTK_WINDOW(win), scr);
-
+static void setup_terminal(VteTerminal* vt) {
     PangoFontDescription* fd = pango_font_description_from_string("Monospace 9");
     vte_terminal_set_font(vt, fd);
     pango_font_description_free(fd);
@@ -322,10 +309,14 @@ static void create_window(GtkApplication* app) {
     vte_terminal_set_enable_sixel(vt, FALSE);
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
+}
 
+static void setup_background_color(VteTerminal* vt) {
     GdkRGBA bg = {0, 0, 0, transparency_enabled ? 0.95 : 1.0};
     vte_terminal_set_color_background(vt, &bg);
+}
 
+static void setup_pty_and_shell(VteTerminal* vt) {
     const char* shell = vte_get_user_shell();
     if (!shell || !*shell)
         shell = "/bin/sh";
@@ -343,14 +334,42 @@ static void create_window(GtkApplication* app) {
     }
 
     vte_terminal_set_pty(vt, pty);
-
     vte_pty_spawn_async(pty, NULL, argv, envp, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL, spawn_finished_cb, vt);
 
     g_strfreev(envp);
     g_object_unref(pty);
+}
+
+static void setup_key_events(VteTerminal* vt) {
+    GtkEventController* keys = gtk_event_controller_key_new();
+    g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), vt);
+    gtk_widget_add_controller(GTK_WIDGET(vt), keys);
+}
+
+static void create_window(GtkApplication* app) {
+    static int window_count = 0;
+
+    GtkWidget* win = my_window_new(app);
+    VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
+
+    setup_window_size(win, window_count);
+    window_count++;
+
+    gtk_window_set_icon_name(GTK_WINDOW(win), "1term");
+
+    apply_css(win);
+
+    GtkWidget* scr = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(vt));
+    gtk_window_set_child(GTK_WINDOW(win), scr);
+
+    setup_terminal(vt);
+    setup_background_color(vt);
+
+    setup_pty_and_shell(vt);
 
     g_signal_connect(vt, "child-exited", G_CALLBACK(on_child_exit), win);
-
 #if VTE_CHECK_VERSION(0, 78, 0)
     g_signal_connect(vt, "termprop-changed", G_CALLBACK(title_sig_cb), win);
 #else
@@ -358,9 +377,7 @@ static void create_window(GtkApplication* app) {
     g_signal_connect(vt, "current-directory-uri-changed", G_CALLBACK(title_sig_cb), win);
 #endif
 
-    GtkEventController* keys = gtk_event_controller_key_new();
-    g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), vt);
-    gtk_widget_add_controller(GTK_WIDGET(vt), keys);
+    setup_key_events(vt);
 
     gtk_window_present(GTK_WINDOW(win));
     update_title(vt, GTK_WINDOW(win));
