@@ -46,7 +46,6 @@ static gboolean scrollback_enabled = TRUE;
 static void compress_worker(gpointer data, gpointer unused) {
     CompressJob* j = data;
 
-    /* stream-compress to avoid large allocations and improve locality */
     ZSTD_CStream* zs = ZSTD_createCStream();
     if (!zs)
         goto done;
@@ -58,7 +57,6 @@ static void compress_worker(gpointer data, gpointer unused) {
         goto done;
     }
 
-    /* create logs dir with restrictive perms */
     gchar* dir = g_path_get_dirname(j->path);
     if (g_mkdir_with_parents(dir, 0700) != 0) {
         g_printerr("mkdir %s: %s\n", dir, g_strerror(errno));
@@ -68,9 +66,8 @@ static void compress_worker(gpointer data, gpointer unused) {
     }
     g_free(dir);
 
-    /* write to a secure temp, then atomically rename */
     gchar* tmpl = g_strdup_printf("%s.XXXXXX", j->path);
-    int tfd = g_mkstemp_full(tmpl, O_CLOEXEC, 0600);
+    int tfd = g_mkstemp_full(tmpl, O_WRONLY | O_CLOEXEC, 0600);
     if (tfd < 0) {
         g_printerr("mkstemp %s: %s\n", tmpl, g_strerror(errno));
         g_free(tmpl);
@@ -87,11 +84,11 @@ static void compress_worker(gpointer data, gpointer unused) {
         goto done;
     }
 
-    /* zstd streaming loop */
+    // zstd streaming loop
     const size_t in_total = strlen(j->text);
-    ZSTD_inBuffer in = { j->text, in_total, 0 };
-    unsigned char outbuf[1 << 15]; /* 32 KiB reasonable chunk */
-    ZSTD_outBuffer out = { outbuf, sizeof(outbuf), 0 };
+    ZSTD_inBuffer in = (ZSTD_inBuffer){j->text, in_total, 0};
+    unsigned char outbuf[1 << 15];  // 32 KiB chunk
+    ZSTD_outBuffer out = (ZSTD_outBuffer){outbuf, sizeof(outbuf), 0};
 
     while (in.pos < in.size) {
         out.pos = 0;
@@ -114,7 +111,7 @@ static void compress_worker(gpointer data, gpointer unused) {
         }
     }
 
-    /* flush remaining */
+    // flush remaining
     for (;;) {
         out.pos = 0;
         size_t ret = ZSTD_endStream(zs, &out);
@@ -134,11 +131,12 @@ static void compress_worker(gpointer data, gpointer unused) {
             ZSTD_freeCStream(zs);
             goto done;
         }
-        if (ret == 0) break;
+        if (ret == 0)
+            break;
     }
 
     fflush(tf);
-    fsync(fileno(tf)); /* best-effort durability */
+    fsync(fileno(tf));
     fclose(tf);
 
     if (g_rename(tmpl, j->path) != 0) {
@@ -180,7 +178,6 @@ static void compress_scrollback_async(VteTerminal* vt) {
         }
     }
 
-    /* ~/.1term/logs/terminal_YYYYmmdd_HHMMSS_PID.logz */
     gchar* dir = g_build_filename(g_get_home_dir(), ".1term", "logs", NULL);
     time_t now = time(NULL);
     struct tm tm_info;
@@ -194,7 +191,7 @@ static void compress_scrollback_async(VteTerminal* vt) {
     CompressJob* job = g_new0(CompressJob, 1);
     job->text = txt;
     job->path = path;
-    job->lvl = 15; /* balanced level per zstd manual */
+    job->lvl = 15;
 
     if (!compress_pool) {
         compress_pool = g_thread_pool_new(compress_worker, NULL, g_get_num_processors(), FALSE, NULL);
@@ -227,7 +224,7 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
 
             case GDK_KEY_T: {
                 transparency_enabled = !transparency_enabled;
-                GdkRGBA newbg = {0};
+                GdkRGBA newbg = (GdkRGBA){0};
                 newbg.alpha = transparency_enabled ? 0.8 : 1.0;
                 vte_terminal_set_color_background(vt, &newbg);
                 return TRUE;
@@ -338,8 +335,10 @@ static void setup_window_size(GtkWidget* win, int window_count) {
 
     int width = geometry.width / 2 - border_correction - window_count * 20;
     int height = geometry.height / 5 - window_count * 10;
-    if (width < 150) width = 150;
-    if (height < 80) height = 80;
+    if (width < 150)
+        width = 150;
+    if (height < 80)
+        height = 80;
 
     gtk_window_set_default_size(GTK_WINDOW(win), width, height);
 }
@@ -380,12 +379,11 @@ static void setup_terminal(VteTerminal* vt) {
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
 
-    /* treat -, :, . as part of a word so double click selects MACs */
     vte_terminal_set_word_char_exceptions(vt, "-:.");
 }
 
 static void setup_background_color(VteTerminal* vt) {
-    GdkRGBA bg = {0, 0, 0, transparency_enabled ? 0.95 : 1.0};
+    GdkRGBA bg = (GdkRGBA){0, 0, 0, transparency_enabled ? 0.95 : 1.0};
     vte_terminal_set_color_background(vt, &bg);
 }
 
@@ -421,25 +419,25 @@ static void setup_key_events(VteTerminal* vt) {
 }
 
 static void on_selection_changed(VteTerminal* vt, gpointer user_data) {
-  (void)user_data;
+    (void)user_data;
 
-  if (!vte_terminal_get_has_selection(vt))
-    return;
+    if (!vte_terminal_get_has_selection(vt))
+        return;
 
-  gchar *sel = vte_terminal_get_text_selected(vt, VTE_FORMAT_TEXT);
-  if (!sel)
-    return;
+    gchar* sel = vte_terminal_get_text_selected(vt, VTE_FORMAT_TEXT);
+    if (!sel)
+        return;
 
-  gsize len = strlen(sel);
-  while (len && sel[len - 1] == ':') {
-    sel[--len] = '\0';
-  }
+    gsize len = strlen(sel);
+    while (len && sel[len - 1] == ':') {
+        sel[--len] = '\0';
+    }
 
-  GtkWidget *widget = GTK_WIDGET(vt);
-  GdkClipboard *cb = gtk_widget_get_clipboard(widget);
-  gdk_clipboard_set_text(cb, sel); /* simpler and safe */
+    GtkWidget* widget = GTK_WIDGET(vt);
+    GdkClipboard* cb = gtk_widget_get_clipboard(widget);
+    gdk_clipboard_set_text(cb, sel);  // simpler and safe
 
-  g_free(sel);
+    g_free(sel);
 }
 
 static void create_window(GtkApplication* app) {
@@ -448,8 +446,7 @@ static void create_window(GtkApplication* app) {
     GtkWidget* win = my_window_new(app);
     VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
 
-    g_signal_connect(vt, "selection-changed",
-                     G_CALLBACK(on_selection_changed), NULL);
+    g_signal_connect(vt, "selection-changed", G_CALLBACK(on_selection_changed), NULL);
 
     setup_key_events(vt);
 
