@@ -1,10 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <glib-2.0/glib/gstdio.h>
 #include <gtk/gtk.h>
 #include <vte/vte.h>
 #include <zstd.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,32 +45,114 @@ static gboolean scrollback_enabled = TRUE;
 
 static void compress_worker(gpointer data, gpointer unused) {
     CompressJob* j = data;
-    const size_t src_len = strlen(j->text);
-    const size_t cap = ZSTD_compressBound(src_len);
 
-    void* buf = malloc(cap);
-    if (!buf)
+    /* stream-compress to avoid large allocations and improve locality */
+    ZSTD_CStream* zs = ZSTD_createCStream();
+    if (!zs)
         goto done;
 
-    size_t compressed_size = ZSTD_compress(buf, cap, j->text, src_len, j->lvl);
-    if (ZSTD_isError(compressed_size)) {
-        g_printerr("zstd: %s\n", ZSTD_getErrorName(compressed_size));
-        free(buf);
-        goto done;
-    }
-
-    FILE* f = fopen(j->path, "wb");
-    if (!f) {
-        g_printerr("%s: %s\n", j->path, g_strerror(errno));
-        free(buf);
+    size_t zr = ZSTD_initCStream(zs, j->lvl);
+    if (ZSTD_isError(zr)) {
+        g_printerr("zstd init: %s\n", ZSTD_getErrorName(zr));
+        ZSTD_freeCStream(zs);
         goto done;
     }
 
-    fwrite(buf, 1, compressed_size, f);
-    fclose(f);
-    free(buf);
+    /* create logs dir with restrictive perms */
+    gchar* dir = g_path_get_dirname(j->path);
+    if (g_mkdir_with_parents(dir, 0700) != 0) {
+        g_printerr("mkdir %s: %s\n", dir, g_strerror(errno));
+        g_free(dir);
+        ZSTD_freeCStream(zs);
+        goto done;
+    }
+    g_free(dir);
 
-    g_print("Scroll-back compressed → %s (%zu B)\n", j->path, compressed_size);
+    /* write to a secure temp, then atomically rename */
+    gchar* tmpl = g_strdup_printf("%s.XXXXXX", j->path);
+    int tfd = g_mkstemp_full(tmpl, O_CLOEXEC, 0600);
+    if (tfd < 0) {
+        g_printerr("mkstemp %s: %s\n", tmpl, g_strerror(errno));
+        g_free(tmpl);
+        ZSTD_freeCStream(zs);
+        goto done;
+    }
+    FILE* tf = fdopen(tfd, "wb");
+    if (!tf) {
+        g_printerr("fdopen: %s\n", g_strerror(errno));
+        close(tfd);
+        g_unlink(tmpl);
+        g_free(tmpl);
+        ZSTD_freeCStream(zs);
+        goto done;
+    }
+
+    /* zstd streaming loop */
+    const size_t in_total = strlen(j->text);
+    ZSTD_inBuffer in = { j->text, in_total, 0 };
+    unsigned char outbuf[1 << 15]; /* 32 KiB reasonable chunk */
+    ZSTD_outBuffer out = { outbuf, sizeof(outbuf), 0 };
+
+    while (in.pos < in.size) {
+        out.pos = 0;
+        size_t ret = ZSTD_compressStream(zs, &out, &in);
+        if (ZSTD_isError(ret)) {
+            g_printerr("zstd write: %s\n", ZSTD_getErrorName(ret));
+            fclose(tf);
+            g_unlink(tmpl);
+            g_free(tmpl);
+            ZSTD_freeCStream(zs);
+            goto done;
+        }
+        if (out.pos && fwrite(out.dst, 1, out.pos, tf) != out.pos) {
+            g_printerr("fwrite: %s\n", g_strerror(errno));
+            fclose(tf);
+            g_unlink(tmpl);
+            g_free(tmpl);
+            ZSTD_freeCStream(zs);
+            goto done;
+        }
+    }
+
+    /* flush remaining */
+    for (;;) {
+        out.pos = 0;
+        size_t ret = ZSTD_endStream(zs, &out);
+        if (ZSTD_isError(ret)) {
+            g_printerr("zstd end: %s\n", ZSTD_getErrorName(ret));
+            fclose(tf);
+            g_unlink(tmpl);
+            g_free(tmpl);
+            ZSTD_freeCStream(zs);
+            goto done;
+        }
+        if (out.pos && fwrite(out.dst, 1, out.pos, tf) != out.pos) {
+            g_printerr("fwrite: %s\n", g_strerror(errno));
+            fclose(tf);
+            g_unlink(tmpl);
+            g_free(tmpl);
+            ZSTD_freeCStream(zs);
+            goto done;
+        }
+        if (ret == 0) break;
+    }
+
+    fflush(tf);
+    fsync(fileno(tf)); /* best-effort durability */
+    fclose(tf);
+
+    if (g_rename(tmpl, j->path) != 0) {
+        g_printerr("rename %s -> %s: %s\n", tmpl, j->path, g_strerror(errno));
+        g_unlink(tmpl);
+        g_free(tmpl);
+        ZSTD_freeCStream(zs);
+        goto done;
+    }
+
+    g_print("Scroll-back compressed \u2192 %s\n", j->path);
+
+    g_free(tmpl);
+    ZSTD_freeCStream(zs);
 
 done:
     g_free(j->text);
@@ -96,20 +180,13 @@ static void compress_scrollback_async(VteTerminal* vt) {
         }
     }
 
+    /* ~/.1term/logs/terminal_YYYYmmdd_HHMMSS_PID.logz */
     gchar* dir = g_build_filename(g_get_home_dir(), ".1term", "logs", NULL);
-    if (g_mkdir_with_parents(dir, 0700) != 0) {
-        g_printerr("mkdir %s: %s\n", dir, g_strerror(errno));
-        g_free(txt);
-        g_free(dir);
-        return;
-    }
-
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
-
     char timestr[64];
-    strftime(timestr, sizeof(timestr), "terminal_%Y%m%d_%H%M%S.logz", &tm_info);
+    strftime(timestr, sizeof(timestr), "terminal_%Y%m%d_%H%M%S_%d.logz", &tm_info);
 
     gchar* path = g_build_filename(dir, timestr, NULL);
     g_free(dir);
@@ -117,7 +194,7 @@ static void compress_scrollback_async(VteTerminal* vt) {
     CompressJob* job = g_new0(CompressJob, 1);
     job->text = txt;
     job->path = path;
-    job->lvl = 19;
+    job->lvl = 15; /* balanced level per zstd manual */
 
     if (!compress_pool) {
         compress_pool = g_thread_pool_new(compress_worker, NULL, g_get_num_processors(), FALSE, NULL);
@@ -150,11 +227,7 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
 
             case GDK_KEY_T: {
                 transparency_enabled = !transparency_enabled;
-                GdkRGBA newbg;
-                newbg.red = 0.0;
-                newbg.green = 0.0;
-                newbg.blue = 0.0;
-
+                GdkRGBA newbg = {0};
                 newbg.alpha = transparency_enabled ? 0.8 : 1.0;
                 vte_terminal_set_color_background(vt, &newbg);
                 return TRUE;
@@ -162,7 +235,6 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
 
             case GDK_KEY_S: {
                 scrollback_enabled = !scrollback_enabled;
-
                 vte_terminal_set_scrollback_lines(vt, scrollback_enabled ? 100000 : 0);
                 return TRUE;
             }
@@ -212,7 +284,7 @@ static void title_sig_cb(VteTerminal* vt, guint prop_id, gpointer user_data) {
 }
 
 static void on_child_exit(VteTerminal* vt, int status, GtkWindow* win) {
-    g_print("Shell exited (status=%d). Closing window.\n", status);
+    g_print("Shell exited (status=%d). Closing window\n", status);
     gtk_window_destroy(win);
 }
 
@@ -266,10 +338,8 @@ static void setup_window_size(GtkWidget* win, int window_count) {
 
     int width = geometry.width / 2 - border_correction - window_count * 20;
     int height = geometry.height / 5 - window_count * 10;
-    if (width < 150)
-        width = 150;
-    if (height < 80)
-        height = 80;
+    if (width < 150) width = 150;
+    if (height < 80) height = 80;
 
     gtk_window_set_default_size(GTK_WINDOW(win), width, height);
 }
@@ -309,6 +379,9 @@ static void setup_terminal(VteTerminal* vt) {
     vte_terminal_set_enable_sixel(vt, FALSE);
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
+
+    /* treat -, :, . as part of a word so double click selects MACs */
+    vte_terminal_set_word_char_exceptions(vt, "-:.");
 }
 
 static void setup_background_color(VteTerminal* vt) {
@@ -317,12 +390,11 @@ static void setup_background_color(VteTerminal* vt) {
 }
 
 static void setup_pty_and_shell(VteTerminal* vt) {
-    const char* shell = vte_get_user_shell();
-    if (!shell || !*shell)
-        shell = "/bin/sh";
+    const char* shell = "/bin/bash";
 
-    char* argv[] = {(char*)shell, NULL};
+    char* argv[] = {(char*)shell, "-i", NULL};
     char** envp = g_environ_setenv(g_get_environ(), "TERM", "xterm-256color", TRUE);
+    envp = g_environ_setenv(envp, "PS1", "\\u@\\h:\\w\\$ ", TRUE);
 
     GError* err = NULL;
     VtePty* pty = vte_pty_new_sync(VTE_PTY_DEFAULT, NULL, &err);
@@ -334,6 +406,8 @@ static void setup_pty_and_shell(VteTerminal* vt) {
     }
 
     vte_terminal_set_pty(vt, pty);
+    vte_terminal_set_input_enabled(vt, TRUE);
+
     vte_pty_spawn_async(pty, NULL, argv, envp, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL, spawn_finished_cb, vt);
 
     g_strfreev(envp);
@@ -346,11 +420,38 @@ static void setup_key_events(VteTerminal* vt) {
     gtk_widget_add_controller(GTK_WIDGET(vt), keys);
 }
 
+static void on_selection_changed(VteTerminal* vt, gpointer user_data) {
+  (void)user_data;
+
+  if (!vte_terminal_get_has_selection(vt))
+    return;
+
+  gchar *sel = vte_terminal_get_text_selected(vt, VTE_FORMAT_TEXT);
+  if (!sel)
+    return;
+
+  gsize len = strlen(sel);
+  while (len && sel[len - 1] == ':') {
+    sel[--len] = '\0';
+  }
+
+  GtkWidget *widget = GTK_WIDGET(vt);
+  GdkClipboard *cb = gtk_widget_get_clipboard(widget);
+  gdk_clipboard_set_text(cb, sel); /* simpler and safe */
+
+  g_free(sel);
+}
+
 static void create_window(GtkApplication* app) {
     static int window_count = 0;
 
     GtkWidget* win = my_window_new(app);
     VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
+
+    g_signal_connect(vt, "selection-changed",
+                     G_CALLBACK(on_selection_changed), NULL);
+
+    setup_key_events(vt);
 
     setup_window_size(win, window_count);
     window_count++;
@@ -366,7 +467,6 @@ static void create_window(GtkApplication* app) {
 
     setup_terminal(vt);
     setup_background_color(vt);
-
     setup_pty_and_shell(vt);
 
     g_signal_connect(vt, "child-exited", G_CALLBACK(on_child_exit), win);
@@ -376,8 +476,6 @@ static void create_window(GtkApplication* app) {
     g_signal_connect(vt, "window-title-changed", G_CALLBACK(title_sig_cb), win);
     g_signal_connect(vt, "current-directory-uri-changed", G_CALLBACK(title_sig_cb), win);
 #endif
-
-    setup_key_events(vt);
 
     gtk_window_present(GTK_WINDOW(win));
     update_title(vt, GTK_WINDOW(win));
