@@ -379,7 +379,7 @@ static void setup_terminal(VteTerminal* vt) {
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
 
-    vte_terminal_set_word_char_exceptions(vt, "-:.");
+    vte_terminal_set_word_char_exceptions(vt, "-:./");
 }
 
 static void setup_background_color(VteTerminal* vt) {
