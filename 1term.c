@@ -362,6 +362,14 @@ static void apply_css(GtkWidget* win) {
     g_object_unref(prov);
 }
 
+static void vte_set_robust_word_chars(VteTerminal* vt) {
+    /* includes - . / _ ~ : @ % + # = , */
+    const char* exceptions = "-./_~:@%+#=," /* paths, URLs, queries, kv pairs */
+        ;                                   /* keep as a literal to avoid accidental trailing spaces */
+
+    vte_terminal_set_word_char_exceptions(vt, exceptions);
+}
+
 static void setup_terminal(VteTerminal* vt) {
     PangoFontDescription* fd = pango_font_description_from_string("Monospace 9");
     vte_terminal_set_font(vt, fd);
@@ -379,7 +387,7 @@ static void setup_terminal(VteTerminal* vt) {
     vte_terminal_set_enable_fallback_scrolling(vt, FALSE);
     vte_terminal_set_audible_bell(vt, FALSE);
 
-    vte_terminal_set_word_char_exceptions(vt, "-:./");
+    vte_set_robust_word_chars(vt);
 }
 
 static void setup_background_color(VteTerminal* vt) {
