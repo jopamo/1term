@@ -19,7 +19,7 @@
 #ifndef VTE_CHECK_VERSION
 #define VTE_CHECK_VERSION(maj, min, mic)                                                         \
     ((VTE_MAJOR_VERSION > (maj)) || (VTE_MAJOR_VERSION == (maj) && VTE_MINOR_VERSION > (min)) || \
-     (VTE_MAJOR_VERSION == (maj) && VTE_MINOR_VERSION == (min) && VTE_MICRO_VERSION >= (mic)))
+     (VTE_MAJOR_VERSION == (maj) && VTE_MICRO_VERSION >= (mic)))
 #endif
 
 #if !VTE_CHECK_VERSION(0, 78, 0)
@@ -158,28 +158,36 @@ done:
     g_free(j);
 }
 
-static void compress_scrollback_async(VteTerminal* vt) {
-    gsize text_len = 0;
+// async clipboard -> compress callback
+static void compress_clipboard_text_ready(GObject* source_object, GAsyncResult* res, gpointer user_data) {
+    GdkClipboard* cb = GDK_CLIPBOARD(source_object);
+    VteTerminal* vt = VTE_TERMINAL(user_data);
+    GError* error = NULL;
 
-    // Request full buffer: from row 0, col 0 to “end” using -1, -1
-    gchar* txt = vte_terminal_get_text_range_format(vt, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
-    if (!txt || !*txt) {
-        g_free(txt);
+    char* text = gdk_clipboard_read_text_finish(cb, res, &error);
+    if (!text) {
+        if (error) {
+            g_printerr("clipboard read: %s\n", error->message);
+            g_clear_error(&error);
+        }
+        vte_terminal_unselect_all(vt);
+        g_object_unref(vt);
         return;
     }
 
+    // build destination path under ~/.1term/logs
     gchar* dir = g_build_filename(g_get_home_dir(), ".1term", "logs", NULL);
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
     char timestr[64];
     strftime(timestr, sizeof(timestr), "terminal_%Y%m%d_%H%M%S_%d.logz", &tm_info);
-
     gchar* path = g_build_filename(dir, timestr, NULL);
     g_free(dir);
 
+    // dispatch compression to thread pool
     CompressJob* job = g_new0(CompressJob, 1);
-    job->text = txt;
+    job->text = text;
     job->path = path;
     job->lvl = 15;
 
@@ -187,6 +195,24 @@ static void compress_scrollback_async(VteTerminal* vt) {
         compress_pool = g_thread_pool_new(compress_worker, NULL, g_get_num_processors(), FALSE, NULL);
     }
     g_thread_pool_push(compress_pool, job, NULL);
+
+    // optional UX cleanup
+    vte_terminal_unselect_all(vt);
+
+    g_object_unref(vt);
+}
+
+// selects all, copies to clipboard, then reads text back and compresses it
+static void compress_scrollback_via_clipboard_async(VteTerminal* vt) {
+    GtkWidget* widget = GTK_WIDGET(vt);
+    GdkClipboard* cb = gtk_widget_get_clipboard(widget);
+
+    vte_terminal_select_all(vt);
+    vte_terminal_copy_clipboard_format(vt, VTE_FORMAT_TEXT);
+
+    g_object_ref(vt);
+
+    gdk_clipboard_read_text_async(cb, NULL, compress_clipboard_text_ready, vt);
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
@@ -209,7 +235,8 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
                 vte_terminal_copy_clipboard_format(vt, VTE_FORMAT_TEXT);
                 return TRUE;
             case GDK_KEY_B:
-                compress_scrollback_async(vt);
+                // compress via select-all -> copy -> read clipboard
+                compress_scrollback_via_clipboard_async(vt);
                 return TRUE;
 
             case GDK_KEY_T: {
@@ -353,9 +380,8 @@ static void apply_css(GtkWidget* win) {
 }
 
 static void vte_set_robust_word_chars(VteTerminal* vt) {
-    /* includes - . / _ ~ : @ % + # = , */
-    const char* exceptions = "-./_~:@%+#=," /* paths, URLs, queries, kv pairs */
-        ;                                   /* keep as a literal to avoid accidental trailing spaces */
+    // includes - . / _ ~ : @ % + # = , for paths, URLs, queries, kv pairs
+    const char* exceptions = "-./_~:@%+#=,";
 
     vte_terminal_set_word_char_exceptions(vt, exceptions);
 }
@@ -433,7 +459,7 @@ static void on_selection_changed(VteTerminal* vt, gpointer user_data) {
 
     GtkWidget* widget = GTK_WIDGET(vt);
     GdkClipboard* cb = gtk_widget_get_clipboard(widget);
-    gdk_clipboard_set_text(cb, sel);  // simpler and safe
+    gdk_clipboard_set_text(cb, sel);
 
     g_free(sel);
 }
@@ -491,8 +517,16 @@ static void free_compress_pool(void) {
     }
 }
 
+// force-disable GTK accessibility bridge early to avoid a11y bus warnings
+static void hard_disable_a11y(void) {
+    g_setenv("GTK_A11Y", "none", TRUE);
+    g_setenv("NO_AT_BRIDGE", "1", TRUE);
+}
+
 int main(int argc, char** argv) {
     atexit(free_compress_pool);
+
+    hard_disable_a11y();  // must run before GTK initialization
 
     GtkApplication* app = gtk_application_new("com.example.oneterm", G_APPLICATION_NON_UNIQUE);
 
