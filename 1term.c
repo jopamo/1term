@@ -161,21 +161,11 @@ done:
 static void compress_scrollback_async(VteTerminal* vt) {
     gsize text_len = 0;
 
+    // Request full buffer: from row 0, col 0 to “end” using -1, -1
     gchar* txt = vte_terminal_get_text_range_format(vt, VTE_FORMAT_TEXT, 0, 0, -1, -1, &text_len);
     if (!txt || !*txt) {
         g_free(txt);
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-        txt = vte_terminal_get_text(vt, NULL, NULL, NULL);
-#ifdef __GNUC__
-#pragma GCC diagnostic pop
-#endif
-        if (!txt || !*txt) {
-            g_free(txt);
-            return;
-        }
+        return;
     }
 
     gchar* dir = g_build_filename(g_get_home_dir(), ".1term", "logs", NULL);
