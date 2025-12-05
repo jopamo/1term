@@ -1,94 +1,106 @@
 <div align="center">
-  <img src="assets/icons/1term.png" alt="1term Logo" />
+  <img src="assets/icons/1term.png" alt="1term Logo" width="128" height="128" />
 </div>
 
-<h1 align="center">1term - A Terminal Emulator</h1>
+<h1 align="center">1term - A Lightweight Terminal Emulator</h1>
 
-## Overview
-`1term` is a basic terminal emulator built with GTK4 and VTE.
+<p align="center">
+  A fast, minimal terminal emulator built with GTK4 and VTE
+</p>
 
-## Project Structure
-The project is organized into modular components:
-- `src/main.c` - Application entry point and initialization
-- `src/window.c/h` - Window management and UI
-- `src/tab.c/h` - Tab management and navigation
-- `src/terminal.c/h` - Terminal configuration and keybindings
-- `src/clipboard.c/h` - Clipboard integration and scrollback compression
-- `assets/` - Icons and desktop files
-- `docs/` - Documentation (planned)
+## ✨ Features
 
-This modular structure improves maintainability and separation of concerns.
+- **Tabbed Interface**: Multiple terminals in one window with tab management
+- **Transparency Control**: Toggle window transparency on the fly
+- **Scrollback Compression**: Save terminal history to compressed log files
+- **Smart Clipboard**: Automatic copy-on-select with clipboard integration
+- **Customizable**: Toggle scrollback, transparency, and other settings via keybindings
+- **Lightweight**: Minimal dependencies, fast startup
 
-## Requirements
-- **GTK4**: For GUI components.
-- **VTE**: For terminal emulator functionality.
-- **Pango**: For font handling.
+## 🚀 Quick Start
 
-## Installation
+### Install Dependencies
 
-### Dependencies
-To build the project, you need to install the following dependencies:
-- `meson`
-- `gcc` or `clang`
-- `pkg-config`
-- `libgtk-4-dev`
-- `libvte-2.91-gtk4-dev`
-
-### Build Instructions
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/jopamo/1term.git
-   cd 1term
-   ```
-
-2. Build the project with Meson:
-   ```bash
-   meson setup builddir --wipe
-   meson compile -C builddir
-   ```
-
-3. Install the project:
-   ```bash
-   sudo meson install -C builddir
-   ```
-
-### Running the Application
-
-To run the terminal emulator:
-
+**Debian/Ubuntu:**
 ```bash
-./builddir/1term
+sudo apt install meson gcc pkg-config libgtk-4-dev libvte-2.91-gtk4-dev
 ```
 
-## Keybindings
-- `Ctrl+Shift+C`: Copy selected text to clipboard.
-- `Ctrl+Shift+V`: Paste clipboard content.
-- `Ctrl+Shift+A`: Select all text and copy to clipboard.
-- `Ctrl+Shift+B`: Compress scrollback buffer to file.
-- `Ctrl+Shift+T`: Toggle window transparency.
-- `Ctrl+Shift+S`: Toggle scrollback buffer (enable/disable).
-- `Ctrl+Shift+N`: Create new tab.
-- `Ctrl+Shift+W`: Close current tab.
+**Fedora:**
+```bash
+sudo dnf install meson gcc pkg-config gtk4-devel vte291-gtk4-devel
+```
 
-## **📊 Benchmark Comparison**
+**Arch Linux:**
+```bash
+sudo pacman -S meson gcc pkg-config gtk4 vte4
+```
 
-| **Test**                             | **Alacritty (ms)**                              | **1term (ms)**                                 | **Difference**            |
-| ------------------------------------ | ----------------------------------------------- | ----------------------------------------------- | ------------------------- |
-| **cursor_motion**                    | 5.79ms avg (90% < 6ms) ± 0.66ms                | 14.5ms avg (90% < 54ms) ± 21.64ms              | 8.71ms slower             |
-| **dense_cells**                       | 8.53ms avg (90% < 9ms) ± 0.77ms                | 22.28ms avg (90% < 61ms) ± 23.68ms             | 13.75ms slower            |
-| **light_cells**                       | 6.53ms avg (90% < 7ms) ± 0.67ms                | 3.48ms avg (90% < 8ms) ± 2.71ms                | 3.05ms faster             |
-| **medium_cells**                      | 9.85ms avg (90% < 11ms) ± 0.92ms               | 9ms avg (90% < 34ms) ± 13.42ms                 | 0.85ms faster             |
-| **scrolling**                         | 123.67ms avg (90% < 136ms) ± 8.13ms            | 165.65ms avg (90% < 177ms) ± 7.57ms            | 41.98ms slower            |
-| **scrolling_bottom_region**           | 125.66ms avg (90% < 139ms) ± 9.93ms            | 155.77ms avg (90% < 166ms) ± 9.12ms            | 30.11ms slower            |
-| **scrolling_bottom_small_region**     | 123.32ms avg (90% < 136ms) ± 11.05ms           | 159.98ms avg (90% < 173ms) ± 11.73ms           | 36.66ms slower            |
-| **scrolling_fullscreen**              | 8.87ms avg (90% < 11ms) ± 1.22ms               | 9.1ms avg (90% < 18ms) ± 5.53ms                | 0.23ms slower             |
-| **scrolling_top_region**              | 123.75ms avg (90% < 138ms) ± 11.14ms           | 167.85ms avg (90% < 182ms) ± 10.5ms            | 44.1ms slower             |
-| **scrolling_top_small_region**        | 125.04ms avg (90% < 140ms) ± 11.49ms           | 160.11ms avg (90% < 179ms) ± 11.47ms           | 35.07ms slower            |
-| **sync_medium_cells**                 | 10.46ms avg (90% < 11ms) ± 0.87ms              | 9.56ms avg (90% < 36ms) ± 14.31ms              | 0.9ms faster              |
-| **unicode**                           | 6.76ms avg (90% < 7ms) ± 0.62ms                | 8ms avg (90% < 35ms) ± 16.28ms                 | 1.24ms slower             |
+### Build and Install
 
-> **Note:** All times represent the **average latency** over several test samples, with the 90th percentile value and standard deviation included.
+```bash
+# Clone the repository
+git clone https://github.com/jopamo/1term.git
+cd 1term
 
-## License
-This project is licensed under the MIT License.
+# Build
+meson setup builddir --wipe
+meson compile -C builddir
+
+# Install (optional)
+sudo meson install -C builddir
+```
+
+### Run
+
+```bash
+# From build directory
+./builddir/1term
+
+# If installed system-wide
+1term
+```
+
+## ⌨️ Keybindings
+
+All keybindings use **Ctrl+Shift** as modifiers.
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `C` | Copy | Copy selected text to clipboard |
+| `V` | Paste | Paste clipboard content |
+| `A` | Select All | Select all text and copy to clipboard |
+| `B` | Compress Scrollback | Save scrollback buffer to compressed log file |
+| `T` | Toggle Transparency | Enable/disable window transparency |
+| `S` | Toggle Scrollback | Enable/disable scrollback buffer |
+| `N` | New Tab | Create a new terminal tab |
+| `W` | Close Tab | Close current terminal tab |
+
+**Note**: Scrollback files are saved to `~/.1term/logs/terminal_YYYYMMDD_HHMMSS_D.logz`
+
+## 📁 Project Structure
+
+For developers and contributors:
+
+```
+src/
+├── main.c              # Application entry point
+├── window.c/h          # Window management & UI
+├── tab.c/h             # Tab management
+├── terminal.c/h        # Terminal configuration
+└── clipboard.c/h       # Clipboard & compression
+```
+
+## 🤝 Contributing
+
+Contributions are welcome! Please see the [Development Guide](docs/DEVELOPMENT.md) for details on the codebase structure and build process.
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+---
+
+<p align="center">
+  Made with ❤️ using GTK4 and VTE
+</p>
