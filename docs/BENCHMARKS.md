@@ -1,77 +1,6 @@
-<div align="center">
-  <img src="assets/icons/1term.png" alt="1term Logo" />
-</div>
+# Benchmark Comparison
 
-<h1 align="center">1term - A Terminal Emulator</h1>
-
-## Overview
-`1term` is a basic terminal emulator built with GTK4 and VTE.
-
-## Project Structure
-The project is organized into modular components:
-- `src/main.c` - Application entry point and initialization
-- `src/window.c/h` - Window management and UI
-- `src/tab.c/h` - Tab management and navigation
-- `src/terminal.c/h` - Terminal configuration and keybindings
-- `src/clipboard.c/h` - Clipboard integration and scrollback compression
-- `assets/` - Icons and desktop files
-- `docs/` - Documentation (planned)
-
-This modular structure improves maintainability and separation of concerns.
-
-## Requirements
-- **GTK4**: For GUI components.
-- **VTE**: For terminal emulator functionality.
-- **Pango**: For font handling.
-
-## Installation
-
-### Dependencies
-To build the project, you need to install the following dependencies:
-- `meson`
-- `gcc` or `clang`
-- `pkg-config`
-- `libgtk-4-dev`
-- `libvte-2.91-gtk4-dev`
-
-### Build Instructions
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/jopamo/1term.git
-   cd 1term
-   ```
-
-2. Build the project with Meson:
-   ```bash
-   meson setup builddir --wipe
-   meson compile -C builddir
-   ```
-
-3. Install the project:
-   ```bash
-   sudo meson install -C builddir
-   ```
-
-### Running the Application
-
-To run the terminal emulator:
-
-```bash
-./builddir/1term
-```
-
-## Keybindings
-- `Ctrl+Shift+C`: Copy selected text to clipboard.
-- `Ctrl+Shift+V`: Paste clipboard content.
-- `Ctrl+Shift+A`: Select all text and copy to clipboard.
-- `Ctrl+Shift+B`: Compress scrollback buffer to file.
-- `Ctrl+Shift+T`: Toggle window transparency.
-- `Ctrl+Shift+S`: Toggle scrollback buffer (enable/disable).
-- `Ctrl+Shift+N`: Create new tab.
-- `Ctrl+Shift+W`: Close current tab.
-
-## **📊 Benchmark Comparison**
+Benchmarks compare 1term against Alacritty using the [vtebench](https://github.com/alacritty/vtebench) suite.
 
 | **Test**                             | **Alacritty (ms)**                              | **1term (ms)**                                 | **Difference**            |
 | ------------------------------------ | ----------------------------------------------- | ----------------------------------------------- | ------------------------- |
@@ -90,5 +19,21 @@ To run the terminal emulator:
 
 > **Note:** All times represent the **average latency** over several test samples, with the 90th percentile value and standard deviation included.
 
-## License
-This project is licensed under the MIT License.
+## Methodology
+
+1. Both terminals were run on the same hardware under identical conditions.
+2. The `vtebench` tool was used to generate terminal output and measure rendering latency.
+3. Each test was repeated multiple times to ensure statistical significance.
+4. The system was otherwise idle to minimize interference.
+
+## Interpretation
+
+- 1term performs competitively in cell‑heavy rendering (`light_cells`, `medium_cells`).
+- Scrolling performance is slower, likely due to GTK4/VTE overhead.
+- The variance (standard deviation) is higher for 1term, indicating less consistent rendering times.
+
+## Future Optimizations
+
+- Investigate GTK4 drawing optimizations.
+- Evaluate VTE configuration options.
+- Consider custom drawing for simple cell updates.

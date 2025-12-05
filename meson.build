@@ -1,14 +1,14 @@
-project('myproject', 'c',
+project('1term', 'c',
   version: '0.1.0',
 
   default_options : [
-    'c_std=c2x',          # keep the language level
-    'optimization=3',     # -O3   (Meson levels: 0/g/1/2/3/s/z)
-    'b_lto=true',         # -flto (link-time optimisation, thin LTO if Clang)
-    'b_pie=true',         # position-independent executable
-    'b_asneeded=true',    # drop unused shared-libraries at link time
-    'b_staticpic=false',  # don’t force PIC into static libs we don’t build
-    'b_ndebug=if-release' # strip assertions only for release builds
+    'c_std=c2x',
+    'optimization=3',
+    'b_lto=true',
+    'b_pie=true',
+    'b_asneeded=true',
+    'b_staticpic=false',
+    'b_ndebug=if-release'
   ]
 )
 
@@ -43,7 +43,7 @@ zstd_dep = dependency('libzstd')
 #  Targets
 # ────────────────────────────────────────────
 exe_1term = executable('1term',
-  '1term.c',
+  ['src/main.c', 'src/window.c', 'src/tab.c', 'src/terminal.c', 'src/clipboard.c'],
   dependencies : [gtk_dep, vte_dep, glib_dep, zstd_dep],
   install      : true
 )
@@ -51,8 +51,11 @@ exe_1term = executable('1term',
 # ────────────────────────────────────────────
 #  Desktop integration
 # ────────────────────────────────────────────
-install_data('1term.desktop',
+install_data('assets/desktop/1term.desktop',
   install_dir: join_paths(get_option('datadir'), 'applications'))
-install_data('1term.png',
+install_data('assets/icons/1term.png',
   install_dir: join_paths(get_option('datadir'), 'icons', 'hicolor',
                           '256x256', 'apps'))
+install_data('assets/icons/1term.svg',
+  install_dir: join_paths(get_option('datadir'), 'icons', 'hicolor',
+                          'scalable', 'apps'))

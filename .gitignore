@@ -1,2 +1,22 @@
+# Build directories
+/build*
+/build-*
 /builddir
-/build
+/build-meson-*
+/build-*/
+
+# Backup files
+*.backup
+*.backup[0-9]
+*.backup[0-9][0-9]
+*~
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# macOS
+.DS_Store
