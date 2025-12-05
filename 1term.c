@@ -31,6 +31,24 @@
 #endif
 
 static void create_window(GtkApplication* app);
+static VteTerminal* add_tab(GtkNotebook* notebook);
+static void close_current_tab(GtkNotebook* notebook);
+static void on_tab_close_clicked(GtkButton* btn, gpointer user_data);
+static void on_child_exit_tab(VteTerminal* vt, int status, GtkNotebook* notebook);
+static void update_tab_title(VteTerminal* vt, GtkNotebook* notebook);
+static void on_notebook_page_added(GtkNotebook* notebook, GtkWidget* child, guint page_num, gpointer user_data);
+static void on_notebook_page_removed(GtkNotebook* notebook, GtkWidget* child, guint page_num, gpointer user_data);
+static void on_notebook_switch_page(GtkNotebook* notebook, GtkWidget* page, guint page_num, gpointer user_data);
+static GtkNotebook* get_notebook_from_terminal(VteTerminal* vt);
+static void title_tab_sig_cb_new(VteTerminal* vt, guint prop_id, gpointer user_data);
+static void update_transparency_for_notebook(GtkNotebook* notebook);
+static void update_transparency_all(void);
+static void update_css_transparency(void);
+static void update_scrollback_for_notebook(GtkNotebook* notebook);
+static void update_scrollback_all(void);
+#if !VTE_CHECK_VERSION(0, 78, 0)
+static void title_tab_sig_cb_old(VteTerminal* vt, gpointer user_data);
+#endif
 
 static GThreadPool* compress_pool = NULL;
 
@@ -42,6 +60,7 @@ typedef struct {
 
 static gboolean transparency_enabled = TRUE;
 static gboolean scrollback_enabled = TRUE;
+static GtkCssProvider* css_provider = NULL;
 
 static void compress_worker(gpointer data, gpointer unused) {
     CompressJob* j = data;
@@ -241,15 +260,27 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
 
             case GDK_KEY_T: {
                 transparency_enabled = !transparency_enabled;
-                GdkRGBA newbg = (GdkRGBA){0};
-                newbg.alpha = transparency_enabled ? 0.8 : 1.0;
-                vte_terminal_set_color_background(vt, &newbg);
+                update_transparency_all();
                 return TRUE;
             }
 
             case GDK_KEY_S: {
                 scrollback_enabled = !scrollback_enabled;
-                vte_terminal_set_scrollback_lines(vt, scrollback_enabled ? 100000 : 0);
+                update_scrollback_all();
+                return TRUE;
+            }
+            case GDK_KEY_N: {
+                GtkNotebook* notebook = get_notebook_from_terminal(vt);
+                if (notebook) {
+                    add_tab(notebook);
+                }
+                return TRUE;
+            }
+            case GDK_KEY_W: {
+                GtkNotebook* notebook = get_notebook_from_terminal(vt);
+                if (notebook) {
+                    close_current_tab(notebook);
+                }
                 return TRUE;
             }
         }
@@ -257,54 +288,10 @@ static gboolean on_key_pressed(GtkEventControllerKey* ctrl,
     return FALSE;
 }
 
-static void update_title(VteTerminal* vt, GtkWindow* win) {
-    gsize len = 0;
-
-#if VTE_CHECK_VERSION(0, 78, 0)
-    const char* shell_title = vte_terminal_get_termprop_string(vt, VTE_TERMPROP_XTERM_TITLE, &len);
-    g_autoptr(GUri) cwd_uri = vte_terminal_ref_termprop_uri(vt, VTE_TERMPROP_CURRENT_DIRECTORY_URI);
-#else
-    const char* shell_title = vte_terminal_get_window_title(vt);
-    const char* cwd_uri_str = vte_terminal_get_current_directory_uri(vt);
-    g_autoptr(GUri) cwd_uri = NULL;
-    if (cwd_uri_str)
-        cwd_uri = g_uri_parse(cwd_uri_str, G_URI_FLAGS_NONE, NULL);
-#endif
-
-    if (shell_title && *shell_title) {
-        gtk_window_set_title(win, shell_title);
-        return;
-    }
-
-    if (cwd_uri) {
-        const char* scheme = g_uri_get_scheme(cwd_uri);
-        if (scheme && g_str_equal(scheme, "file")) {
-            const char* path = g_uri_get_path(cwd_uri);
-            if (path && *path) {
-                g_autofree char* s = g_strdup_printf("%s@%s", g_get_user_name(), path);
-                gtk_window_set_title(win, s);
-                return;
-            }
-        }
-    }
-
-    g_autofree char* s = g_strdup_printf("%s@?", g_get_user_name());
-    gtk_window_set_title(win, s);
-}
-
-static void title_sig_cb(VteTerminal* vt, guint prop_id, gpointer user_data) {
-    (void)prop_id;
-    update_title(vt, GTK_WINDOW(user_data));
-}
-
-static void on_child_exit(VteTerminal* vt, int status, GtkWindow* win) {
-    g_print("Shell exited (status=%d). Closing window\n", status);
-    gtk_window_destroy(win);
-}
-
 G_DECLARE_FINAL_TYPE(MyWindow, my_window, MY, WINDOW, GtkApplicationWindow)
 struct _MyWindow {
     GtkApplicationWindow parent_instance;
+    GtkNotebook* notebook;
 };
 G_DEFINE_TYPE(MyWindow, my_window, GTK_TYPE_APPLICATION_WINDOW)
 
@@ -316,7 +303,9 @@ static void my_window_class_init(MyWindowClass* klass) {
     GTK_WIDGET_CLASS(klass)->css_changed = my_window_css_changed;
 }
 
-static void my_window_init(MyWindow* self) {}
+static void my_window_init(MyWindow* self) {
+    self->notebook = NULL;
+}
 
 static GtkWidget* my_window_new(GtkApplication* app) {
     return g_object_new(my_window_get_type(), "application", app, NULL);
@@ -361,22 +350,36 @@ static void setup_window_size(GtkWidget* win, int window_count) {
 }
 
 static void apply_css(GtkWidget* win) {
-    static const char css[] =
-        "window{background-color:rgba(0,0,0,0);} "
-        "vte-terminal{background-color:rgba(0,0,0,0);}";
+    GdkDisplay* display = gtk_widget_get_display(win);
+    if (!css_provider) {
+        css_provider = gtk_css_provider_new();
+        gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(css_provider),
+                                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+    update_css_transparency();
+}
 
-    GtkCssProvider* prov = gtk_css_provider_new();
+static void update_css_transparency(void) {
+    if (!css_provider)
+        return;
+    gdouble alpha = transparency_enabled ? 0.8 : 1.0;
+    g_autofree char* css = g_strdup_printf(
+        "window{background-color:rgba(0,0,0,0);} "
+        "notebook{background-color:rgba(0,0,0,0);} "
+        "notebook > header{background-color:rgba(0,0,0,%g);} "
+        "notebook > stack{background-color:rgba(0,0,0,0);} "
+        "scrolledwindow{background-color:rgba(0,0,0,0);} "
+        "scrollbar{background-color:rgba(0,0,0,%g);} "
+        "vte-terminal{background-color:rgba(0,0,0,0);}",
+        alpha, alpha);
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
-    gtk_css_provider_load_from_data(prov, css, -1);
+    gtk_css_provider_load_from_data(css_provider, css, -1);
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
-    gtk_style_context_add_provider_for_display(gtk_widget_get_display(win), GTK_STYLE_PROVIDER(prov),
-                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_unref(prov);
 }
 
 static void vte_set_robust_word_chars(VteTerminal* vt) {
@@ -407,8 +410,66 @@ static void setup_terminal(VteTerminal* vt) {
 }
 
 static void setup_background_color(VteTerminal* vt) {
-    GdkRGBA bg = (GdkRGBA){0, 0, 0, transparency_enabled ? 0.95 : 1.0};
+    GdkRGBA bg = (GdkRGBA){0, 0, 0, transparency_enabled ? 0.8 : 1.0};
     vte_terminal_set_color_background(vt, &bg);
+}
+
+static void update_transparency_for_notebook(GtkNotebook* notebook) {
+    if (!notebook)
+        return;
+    int n = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        if (!page || !GTK_IS_SCROLLED_WINDOW(page))
+            continue;
+        GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(page));
+        if (child && VTE_IS_TERMINAL(child)) {
+            setup_background_color(VTE_TERMINAL(child));
+        }
+    }
+}
+
+static void update_transparency_all(void) {
+    GList* toplevels = gtk_window_list_toplevels();
+    for (GList* l = toplevels; l; l = l->next) {
+        GtkWindow* win = GTK_WINDOW(l->data);
+        if (MY_IS_WINDOW(win)) {
+            MyWindow* mywin = MY_WINDOW(win);
+            if (mywin->notebook) {
+                update_transparency_for_notebook(mywin->notebook);
+            }
+        }
+    }
+    g_list_free(toplevels);
+}
+
+static void update_scrollback_for_notebook(GtkNotebook* notebook) {
+    if (!notebook)
+        return;
+    int n = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        if (!page || !GTK_IS_SCROLLED_WINDOW(page))
+            continue;
+        GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(page));
+        if (child && VTE_IS_TERMINAL(child)) {
+            vte_terminal_set_scrollback_lines(VTE_TERMINAL(child), scrollback_enabled ? 100000 : 0);
+        }
+    }
+}
+
+static void update_scrollback_all(void) {
+    GList* toplevels = gtk_window_list_toplevels();
+    for (GList* l = toplevels; l; l = l->next) {
+        GtkWindow* win = GTK_WINDOW(l->data);
+        if (MY_IS_WINDOW(win)) {
+            MyWindow* mywin = MY_WINDOW(win);
+            if (mywin->notebook) {
+                update_scrollback_for_notebook(mywin->notebook);
+            }
+        }
+    }
+    g_list_free(toplevels);
 }
 
 static void setup_pty_and_shell(VteTerminal* vt) {
@@ -464,15 +525,265 @@ static void on_selection_changed(VteTerminal* vt, gpointer user_data) {
     g_free(sel);
 }
 
+static GtkNotebook* get_notebook_from_terminal(VteTerminal* vt) {
+    GtkWidget* widget = GTK_WIDGET(vt);
+    GtkWidget* scr = gtk_widget_get_parent(widget);  // scrolled window
+    if (!scr) {
+        g_print("get_notebook_from_terminal: no scrolled window parent, trying window fallback\n");
+        // Fallback: get window and access its notebook member
+        GtkWidget* window = gtk_widget_get_ancestor(widget, GTK_TYPE_WINDOW);
+        if (window && MY_IS_WINDOW(window)) {
+            MyWindow* mywin = MY_WINDOW(window);
+            if (mywin->notebook) {
+                g_print("get_notebook_from_terminal: found notebook via window fallback\n");
+                return mywin->notebook;
+            }
+        }
+        return NULL;
+    }
+    GtkWidget* notebook = gtk_widget_get_parent(scr);  // notebook
+    if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
+        g_print("get_notebook_from_terminal: no notebook parent or not notebook, trying window fallback\n");
+        // Fallback
+        GtkWidget* window = gtk_widget_get_ancestor(widget, GTK_TYPE_WINDOW);
+        if (window && MY_IS_WINDOW(window)) {
+            MyWindow* mywin = MY_WINDOW(window);
+            if (mywin->notebook) {
+                g_print("get_notebook_from_terminal: found notebook via window fallback\n");
+                return mywin->notebook;
+            }
+        }
+        return NULL;
+    }
+    g_print("get_notebook_from_terminal: found notebook via parent chain\n");
+    return GTK_NOTEBOOK(notebook);
+}
+
+static void title_tab_sig_cb_new(VteTerminal* vt, guint prop_id, gpointer user_data) {
+    (void)prop_id;
+    update_tab_title(vt, GTK_NOTEBOOK(user_data));
+}
+
+#if !VTE_CHECK_VERSION(0, 78, 0)
+static void title_tab_sig_cb_old(VteTerminal* vt, gpointer user_data) {
+    update_tab_title(vt, GTK_NOTEBOOK(user_data));
+}
+#endif
+
+static VteTerminal* add_tab(GtkNotebook* notebook) {
+    g_print("add_tab called\n");
+    // Create terminal
+    VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
+
+    // Setup terminal
+    setup_terminal(vt);
+    setup_background_color(vt);
+
+    // Create scrolled window
+    GtkWidget* scr = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(vt));
+
+    // Create tab label with close button
+    GtkWidget* hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget* label = gtk_label_new("Terminal");
+    GtkWidget* close_btn = gtk_button_new_from_icon_name("window-close");
+    gtk_button_set_has_frame(GTK_BUTTON(close_btn), FALSE);
+    gtk_widget_set_cursor_from_name(close_btn, "pointer");
+    gtk_box_append(GTK_BOX(hbox), label);
+    gtk_box_append(GTK_BOX(hbox), close_btn);
+    gtk_widget_set_visible(hbox, TRUE);
+
+    // Append to notebook
+    gtk_notebook_append_page(notebook, scr, hbox);
+    // Switch to the new tab
+    int page_num = gtk_notebook_page_num(notebook, scr);
+    if (page_num >= 0) {
+        gtk_notebook_set_current_page(notebook, page_num);
+    }
+
+    // Connect signals
+    g_signal_connect(vt, "selection-changed", G_CALLBACK(on_selection_changed), NULL);
+    setup_key_events(vt);
+
+    // Connect child-exit with notebook as user_data
+    g_signal_connect(vt, "child-exited", G_CALLBACK(on_child_exit_tab), notebook);
+
+    // Connect title updates
+#if VTE_CHECK_VERSION(0, 78, 0)
+    g_signal_connect(vt, "termprop-changed", G_CALLBACK(title_tab_sig_cb_new), notebook);
+#else
+    g_signal_connect(vt, "window-title-changed", G_CALLBACK(title_tab_sig_cb_old), notebook);
+    g_signal_connect(vt, "current-directory-uri-changed", G_CALLBACK(title_tab_sig_cb_old), notebook);
+#endif
+
+    // Spawn shell
+    setup_pty_and_shell(vt);
+
+    // Connect close button
+    g_signal_connect(close_btn, "clicked", G_CALLBACK(on_tab_close_clicked), notebook);
+
+    // Set initial tab label
+    update_tab_title(vt, notebook);
+
+    return vt;
+}
+
+static void on_tab_close_clicked(GtkButton* btn, gpointer user_data) {
+    GtkNotebook* notebook = GTK_NOTEBOOK(user_data);
+    if (!notebook)
+        return;
+    // Iterate pages to find which page has this button
+    int n = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        GtkWidget* tab_label = gtk_notebook_get_tab_label(notebook, page);
+        if (tab_label && gtk_widget_is_ancestor(GTK_WIDGET(btn), tab_label)) {
+            // Close the page
+            gtk_notebook_remove_page(notebook, i);
+            break;
+        }
+    }
+}
+
+static void on_child_exit_tab(VteTerminal* vt, int status, GtkNotebook* notebook) {
+    if (!notebook)
+        return;
+    g_print("Shell exited (status=%d). Closing tab\n", status);
+    // Find page index for this terminal
+    int n = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        // page is scrolled window, its child is terminal
+        GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(page));
+        if (GTK_WIDGET(vt) == child) {
+            gtk_notebook_remove_page(notebook, i);
+            break;
+        }
+    }
+    // If no pages left, close window
+    if (gtk_notebook_get_n_pages(notebook) == 0) {
+        GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
+        gtk_window_destroy(GTK_WINDOW(window));
+    }
+}
+
+static void update_tab_title(VteTerminal* vt, GtkNotebook* notebook) {
+    if (!notebook)
+        return;
+    // Find page index for this terminal
+    int n = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        if (!page || !GTK_IS_SCROLLED_WINDOW(page))
+            continue;
+        GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(page));
+        if (GTK_WIDGET(vt) == child) {
+            GtkWidget* tab_label = gtk_notebook_get_tab_label(notebook, page);
+            if (!tab_label)
+                break;
+            // tab_label is the hbox, its first child is GtkLabel
+            GtkWidget* label = gtk_widget_get_first_child(tab_label);
+            if (label && GTK_IS_LABEL(label)) {
+                // Use same title logic as update_title
+                gsize len = 0;
+#if VTE_CHECK_VERSION(0, 78, 0)
+                const char* shell_title = vte_terminal_get_termprop_string(vt, VTE_TERMPROP_XTERM_TITLE, &len);
+                g_autoptr(GUri) cwd_uri = vte_terminal_ref_termprop_uri(vt, VTE_TERMPROP_CURRENT_DIRECTORY_URI);
+#else
+                const char* shell_title = vte_terminal_get_window_title(vt);
+                const char* cwd_uri_str = vte_terminal_get_current_directory_uri(vt);
+                g_autoptr(GUri) cwd_uri = NULL;
+                if (cwd_uri_str)
+                    cwd_uri = g_uri_parse(cwd_uri_str, G_URI_FLAGS_NONE, NULL);
+#endif
+                g_autofree char* title = NULL;
+                if (shell_title && *shell_title) {
+                    title = g_strdup(shell_title);
+                }
+                else if (cwd_uri) {
+                    const char* scheme = g_uri_get_scheme(cwd_uri);
+                    if (scheme && g_str_equal(scheme, "file")) {
+                        const char* path = g_uri_get_path(cwd_uri);
+                        if (path && *path) {
+                            title = g_strdup_printf("%s@%s", g_get_user_name(), path);
+                        }
+                    }
+                }
+                if (!title) {
+                    title = g_strdup_printf("%s@?", g_get_user_name());
+                }
+                gtk_label_set_text(GTK_LABEL(label), title);
+
+                // Also update window title if this is the active tab
+                if (i == gtk_notebook_get_current_page(notebook)) {
+                    GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
+                    gtk_window_set_title(GTK_WINDOW(window), title);
+                }
+            }
+            break;
+        }
+    }
+}
+
+static void on_notebook_page_added(GtkNotebook* notebook, GtkWidget* child, guint page_num, gpointer user_data) {
+    (void)child;
+    (void)page_num;
+    (void)user_data;
+    g_print("on_notebook_page_added: pages=%d\n", gtk_notebook_get_n_pages(notebook));
+    // Show tabs if more than one page
+    gboolean show_tabs = gtk_notebook_get_n_pages(notebook) > 1;
+    g_print("Setting show_tabs=%d\n", show_tabs);
+    gtk_notebook_set_show_tabs(notebook, show_tabs);
+}
+
+static void on_notebook_page_removed(GtkNotebook* notebook, GtkWidget* child, guint page_num, gpointer user_data) {
+    (void)child;
+    (void)page_num;
+    (void)user_data;
+    // Show tabs if more than one page
+    gtk_notebook_set_show_tabs(notebook, gtk_notebook_get_n_pages(notebook) > 1);
+    // If no pages left, close window
+    if (gtk_notebook_get_n_pages(notebook) == 0) {
+        GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
+        gtk_window_destroy(GTK_WINDOW(window));
+    }
+}
+
+static void on_notebook_switch_page(GtkNotebook* notebook, GtkWidget* page, guint page_num, gpointer user_data) {
+    (void)page;
+    (void)user_data;
+    // Update window title to active tab's title
+    GtkWidget* scr = gtk_notebook_get_nth_page(notebook, page_num);
+    GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(scr));
+    VteTerminal* vt = VTE_TERMINAL(child);
+    update_tab_title(vt, notebook);
+}
+
+static void close_current_tab(GtkNotebook* notebook) {
+    int current = gtk_notebook_get_current_page(notebook);
+    if (current >= 0) {
+        gtk_notebook_remove_page(notebook, current);
+    }
+}
+
 static void create_window(GtkApplication* app) {
     static int window_count = 0;
 
     GtkWidget* win = my_window_new(app);
-    VteTerminal* vt = VTE_TERMINAL(vte_terminal_new());
+    MyWindow* mywin = MY_WINDOW(win);
 
-    g_signal_connect(vt, "selection-changed", G_CALLBACK(on_selection_changed), NULL);
+    // Create notebook
+    GtkNotebook* notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    mywin->notebook = notebook;
 
-    setup_key_events(vt);
+    // Connect notebook signals
+    g_signal_connect(notebook, "page-added", G_CALLBACK(on_notebook_page_added), NULL);
+    g_signal_connect(notebook, "page-removed", G_CALLBACK(on_notebook_page_removed), NULL);
+    g_signal_connect(notebook, "switch-page", G_CALLBACK(on_notebook_switch_page), NULL);
+
+    // Set notebook as window child
+    gtk_window_set_child(GTK_WINDOW(win), GTK_WIDGET(notebook));
 
     setup_window_size(win, window_count);
     window_count++;
@@ -481,25 +792,11 @@ static void create_window(GtkApplication* app) {
 
     apply_css(win);
 
-    GtkWidget* scr = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(vt));
-    gtk_window_set_child(GTK_WINDOW(win), scr);
-
-    setup_terminal(vt);
-    setup_background_color(vt);
-    setup_pty_and_shell(vt);
-
-    g_signal_connect(vt, "child-exited", G_CALLBACK(on_child_exit), win);
-#if VTE_CHECK_VERSION(0, 78, 0)
-    g_signal_connect(vt, "termprop-changed", G_CALLBACK(title_sig_cb), win);
-#else
-    g_signal_connect(vt, "window-title-changed", G_CALLBACK(title_sig_cb), win);
-    g_signal_connect(vt, "current-directory-uri-changed", G_CALLBACK(title_sig_cb), win);
-#endif
+    // Add first tab
+    add_tab(notebook);
 
     gtk_window_present(GTK_WINDOW(win));
-    update_title(vt, GTK_WINDOW(win));
+    // Window title will be set via update_tab_title
 }
 
 static void new_window_action(GSimpleAction* a, GVariant* p, gpointer user_data) {
