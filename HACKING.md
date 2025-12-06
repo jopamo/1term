@@ -14,6 +14,7 @@ The GTK 4 renderer (e.g. via its GL/Native back-end) allows delegating much of t
 
 - Depend on `vte-2.91-gtk4` (or whichever version your distro provides) rather than legacy GTK3-based VTE, if you want GTK4 integration
 - Ensure your GTK 4 version is recent enough: while GTK-4.12 might compile, GTK 4.14 (or later) is recommended/stable for the “new NGL renderer” to avoid rendering failures/bugs seen in earlier GL back-ends.
+- Use VTE ≥0.70 to benefit from native GTK4 drawing primitives and frame-clock driven rendering (reduces latency, improves performance)
 - Build using meson/ninja (or your distro’s build system), enabling `gtk4 = true` in VTE’s configuration if building from source.
 
 ## 📄 Hacking & Code Style Guidelines  

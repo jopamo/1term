@@ -33,9 +33,11 @@ endif
 
 # ────────────────────────────────────────────
 #  External dependencies
+#  Ensure modern GTK4 (>=4.14) and VTE (>=0.70) for native drawing primitives
+#  and frame-clock driven rendering (reduces latency, improves performance)
 # ────────────────────────────────────────────
-gtk_dep  = dependency('gtk4')
-vte_dep  = dependency('vte-2.91-gtk4')
+gtk_dep  = dependency('gtk4', version: '>=4.14')
+vte_dep  = dependency('vte-2.91-gtk4', version: '>=0.70')
 glib_dep = dependency('glib-2.0')
 zstd_dep = dependency('libzstd')
 
