@@ -62,7 +62,7 @@ static void apply_css(GtkWidget* win) {
 void update_css_transparency(void) {
     if (!css_provider)
         return;
-    gdouble alpha = transparency_enabled ? 0.8 : 1.0;
+    gdouble alpha = transparency_enabled ? 0.9 : 1.0;
     g_autofree char* css = g_strdup_printf(
         "window{background-color:rgba(0,0,0,0);} "
         "notebook{background-color:rgba(0,0,0,0);} "
