@@ -22,7 +22,7 @@ static void spawn_finished_cb(GObject* source_object, GAsyncResult* res, gpointe
 }
 
 void setup_background_color(VteTerminal* vt) {
-    GdkRGBA bg = (GdkRGBA){0, 0, 0, transparency_enabled ? 0.8 : 1.0};
+    GdkRGBA bg = (GdkRGBA){0, 0, 0, transparency_enabled ? 0.95 : 1.0};
     vte_terminal_set_color_background(vt, &bg);
 }
 
