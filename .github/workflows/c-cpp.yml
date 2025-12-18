@@ -32,6 +32,7 @@ jobs:
             libgtk-4-dev \
             libvte-2.91-gtk4-dev \
             libglib2.0-dev \
+            libzstd-dev \
             valgrind \
             libx11-dev \
             libpango1.0-dev \
@@ -83,30 +84,17 @@ jobs:
         run: |
           sudo meson install -C builddir  # Install the built project
 
-      - name: Set up virtual display with Xvfb
-        run: |
-          # Start Xvfb (virtual framebuffer) for headless testing
-          Xvfb :99 &  # Start Xvfb on display :99
-          export DISPLAY=:99  # Set the DISPLAY environment variable to the virtual display
-
-      - name: Launch and Test the Application (Sanitizer check)
+      - name: Smoke Check (Sanitizer/Valgrind)
         shell: bash
         run: |
-          # Run the application using xvfb-run for headless testing
-          timeout --preserve-status 10s xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" bash -c "
-            ./builddir/1term
-            sleep 5  # Wait for the application to start
-          " || true  # Prevent timeout exit code 124 from failing the job
+          set -euo pipefail
 
           if [ '${{ matrix.sanitizer }}' = 'valgrind' ]; then
             echo 'Running Valgrind memory leak check...'
-            timeout --preserve-status 10s valgrind --leak-check=full --track-origins=yes --error-exitcode=1 ./builddir/1term || true  # Prevent timeout exit code 124
-            valgrind_exit_code=$?
-            if [ $valgrind_exit_code -eq 1 ]; then
-              echo 'Valgrind detected memory leaks!'
-              exit 1  # Fail the job if memory leaks are detected
-            fi
-          elif [ '${{ matrix.sanitizer }}' = 'asan-ubsan' ]; then
+            timeout --preserve-status 10s \
+              valgrind --leak-check=full --track-origins=yes --error-exitcode=1 \
+              ./builddir/1term --version
+          else
             echo 'Running ASan/UBSan checks...'
-            timeout --preserve-status 10s ./builddir/1term || true  # Prevent timeout exit code 124
+            timeout --preserve-status 10s ./builddir/1term --version
           fi

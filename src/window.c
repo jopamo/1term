@@ -32,15 +32,23 @@ GtkNotebook* my_window_get_notebook(MyWindow* self) {
 static void setup_window_size(GtkWidget* win, int window_count) {
     GdkDisplay* display = gtk_widget_get_display(win);
     GListModel* monitors = gdk_display_get_monitors(display);
-    GdkMonitor* monitor = g_list_model_get_item(monitors, 0);
-    GdkRectangle geometry;
-    gdk_monitor_get_geometry(monitor, &geometry);
-    g_object_unref(monitor);
-
     int border_correction = 8;
 
-    int width = geometry.width / 2 - border_correction - window_count * 20;
-    int height = geometry.height / 5 - window_count * 10;
+    int width = 800 - border_correction - window_count * 20;
+    int height = 400 - window_count * 10;
+
+    if (monitors && g_list_model_get_n_items(monitors) > 0) {
+        GdkMonitor* monitor = g_list_model_get_item(monitors, 0);
+        if (monitor) {
+            GdkRectangle geometry;
+            gdk_monitor_get_geometry(monitor, &geometry);
+            g_object_unref(monitor);
+
+            width = geometry.width / 2 - border_correction - window_count * 20;
+            height = geometry.height / 5 - window_count * 10;
+        }
+    }
+
     if (width < 150)
         width = 150;
     if (height < 80)

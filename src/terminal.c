@@ -3,6 +3,8 @@
 #include "clipboard.h"
 #include "tab.h"
 
+#include <pwd.h>
+
 static void spawn_finished_cb(GObject* source_object, GAsyncResult* res, gpointer user_data) {
     VtePty* pty = VTE_PTY(source_object);
     VteTerminal* vt = VTE_TERMINAL(user_data);
@@ -64,20 +66,7 @@ void on_selection_changed(VteTerminal* vt, gpointer user_data) {
     if (!vte_terminal_get_has_selection(vt))
         return;
 
-    gchar* sel = vte_terminal_get_text_selected(vt, VTE_FORMAT_TEXT);
-    if (!sel)
-        return;
-
-    gsize len = strlen(sel);
-    while (len && sel[len - 1] == ':') {
-        sel[--len] = '\0';
-    }
-
-    GtkWidget* widget = GTK_WIDGET(vt);
-    GdkClipboard* cb = gtk_widget_get_clipboard(widget);
-    gdk_clipboard_set_text(cb, sel);
-
-    g_free(sel);
+    vte_terminal_copy_clipboard_format(vt, VTE_FORMAT_TEXT);
 }
 
 gboolean on_key_pressed(GtkEventControllerKey* ctrl,
@@ -134,12 +123,23 @@ gboolean on_key_pressed(GtkEventControllerKey* ctrl,
     return FALSE;
 }
 
-void setup_pty_and_shell(VteTerminal* vt) {
-    const char* shell = "/bin/bash";
+static const char* get_user_shell(void) {
+    const char* shell = g_getenv("SHELL");
+    if (shell && *shell)
+        return shell;
 
-    char* argv[] = {(char*)shell, "-i", NULL};
+    struct passwd* pw = getpwuid(getuid());
+    if (pw && pw->pw_shell && *pw->pw_shell)
+        return pw->pw_shell;
+
+    return "/bin/sh";
+}
+
+void setup_pty_and_shell(VteTerminal* vt) {
+    const char* shell = get_user_shell();
+
+    char* argv[] = {(char*)shell, NULL};
     char** envp = g_environ_setenv(g_get_environ(), "TERM", "xterm-256color", TRUE);
-    envp = g_environ_setenv(envp, "PS1", "\\u@\\h:\\w\\$ ", TRUE);
 
     GError* err = NULL;
     VtePty* pty = vte_pty_new_sync(VTE_PTY_DEFAULT, NULL, &err);
@@ -153,7 +153,8 @@ void setup_pty_and_shell(VteTerminal* vt) {
     vte_terminal_set_pty(vt, pty);
     vte_terminal_set_input_enabled(vt, TRUE);
 
-    vte_pty_spawn_async(pty, NULL, argv, envp, (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL, spawn_finished_cb, vt);
+    GSpawnFlags spawn_flags = g_path_is_absolute(shell) ? (GSpawnFlags)0 : G_SPAWN_SEARCH_PATH;
+    vte_pty_spawn_async(pty, NULL, argv, envp, spawn_flags, NULL, NULL, NULL, -1, NULL, spawn_finished_cb, vt);
 
     g_strfreev(envp);
     g_object_unref(pty);

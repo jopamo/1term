@@ -183,7 +183,7 @@ void on_notebook_page_removed(GtkNotebook* notebook, GtkWidget* child, guint pag
     if (gtk_notebook_get_n_pages(notebook) == 0) {
         GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
         if (window)
-            gtk_window_destroy(GTK_WINDOW(window));
+            gtk_window_close(GTK_WINDOW(window));
     }
     else {
         // Update window title for the now-current page

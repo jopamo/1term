@@ -14,6 +14,10 @@ project('1term', 'c',
 
 cc = meson.get_compiler('c')
 
+conf_data = configuration_data()
+conf_data.set_quoted('ONETERM_VERSION', meson.project_version())
+configure_file(output: 'config.h', configuration: conf_data)
+
 opt_c_args = [
   '-fno-plt',
   '-fdata-sections',

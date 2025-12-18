@@ -1,6 +1,25 @@
+#include "config.h"
 #include "1term.h"
 #include "window.h"
 #include "clipboard.h"
+
+static void print_usage(const char* argv0) {
+    g_print("Usage: %s [--help] [--version]\n", argv0);
+}
+
+static gboolean try_handle_cli(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (g_str_equal(argv[i], "--help") || g_str_equal(argv[i], "-h")) {
+            print_usage(argv[0]);
+            return TRUE;
+        }
+        if (g_str_equal(argv[i], "--version") || g_str_equal(argv[i], "-V")) {
+            g_print("1term %s\n", ONETERM_VERSION);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
 
 static void new_window_action(GSimpleAction* a, GVariant* p, gpointer user_data) {
     create_window(GTK_APPLICATION(user_data));
@@ -16,6 +35,9 @@ static void hard_disable_a11y(void) {
 }
 
 int main(int argc, char** argv) {
+    if (try_handle_cli(argc, argv))
+        return 0;
+
     atexit(free_compress_pool);
 
     hard_disable_a11y();  // must run before GTK initialization
