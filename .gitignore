@@ -20,3 +20,8 @@
 
 # macOS
 .DS_Store
+
+# Documentation symlinks
+AGENTS.md
+CLAUDE.md
+GEMINI.md

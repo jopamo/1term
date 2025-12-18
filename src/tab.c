@@ -100,6 +100,37 @@ void on_child_exit_tab(VteTerminal* vt, int status, GtkNotebook* notebook) {
     }
 }
 
+static char* get_terminal_title(VteTerminal* vt) {
+    gsize len = 0;
+#if VTE_CHECK_VERSION(0, 78, 0)
+    const char* shell_title = vte_terminal_get_termprop_string(vt, VTE_TERMPROP_XTERM_TITLE, &len);
+    g_autoptr(GUri) cwd_uri = vte_terminal_ref_termprop_uri(vt, VTE_TERMPROP_CURRENT_DIRECTORY_URI);
+#else
+    const char* shell_title = vte_terminal_get_window_title(vt);
+    const char* cwd_uri_str = vte_terminal_get_current_directory_uri(vt);
+    g_autoptr(GUri) cwd_uri = NULL;
+    if (cwd_uri_str)
+        cwd_uri = g_uri_parse(cwd_uri_str, G_URI_FLAGS_NONE, NULL);
+#endif
+    char* title = NULL;
+    if (shell_title && *shell_title) {
+        title = g_strdup(shell_title);
+    }
+    else if (cwd_uri) {
+        const char* scheme = g_uri_get_scheme(cwd_uri);
+        if (scheme && g_str_equal(scheme, "file")) {
+            const char* path = g_uri_get_path(cwd_uri);
+            if (path && *path) {
+                title = g_strdup_printf("%s@%s", g_get_user_name(), path);
+            }
+        }
+    }
+    if (!title) {
+        title = g_strdup_printf("%s@?", g_get_user_name());
+    }
+    return title;
+}
+
 void update_tab_title(VteTerminal* vt, GtkNotebook* notebook) {
     if (!notebook)
         return;
@@ -117,40 +148,14 @@ void update_tab_title(VteTerminal* vt, GtkNotebook* notebook) {
             // tab_label is the hbox, its first child is GtkLabel
             GtkWidget* label = gtk_widget_get_first_child(tab_label);
             if (label && GTK_IS_LABEL(label)) {
-                // Use same title logic as update_title
-                gsize len = 0;
-#if VTE_CHECK_VERSION(0, 78, 0)
-                const char* shell_title = vte_terminal_get_termprop_string(vt, VTE_TERMPROP_XTERM_TITLE, &len);
-                g_autoptr(GUri) cwd_uri = vte_terminal_ref_termprop_uri(vt, VTE_TERMPROP_CURRENT_DIRECTORY_URI);
-#else
-                const char* shell_title = vte_terminal_get_window_title(vt);
-                const char* cwd_uri_str = vte_terminal_get_current_directory_uri(vt);
-                g_autoptr(GUri) cwd_uri = NULL;
-                if (cwd_uri_str)
-                    cwd_uri = g_uri_parse(cwd_uri_str, G_URI_FLAGS_NONE, NULL);
-#endif
-                g_autofree char* title = NULL;
-                if (shell_title && *shell_title) {
-                    title = g_strdup(shell_title);
-                }
-                else if (cwd_uri) {
-                    const char* scheme = g_uri_get_scheme(cwd_uri);
-                    if (scheme && g_str_equal(scheme, "file")) {
-                        const char* path = g_uri_get_path(cwd_uri);
-                        if (path && *path) {
-                            title = g_strdup_printf("%s@%s", g_get_user_name(), path);
-                        }
-                    }
-                }
-                if (!title) {
-                    title = g_strdup_printf("%s@?", g_get_user_name());
-                }
+                g_autofree char* title = get_terminal_title(vt);
                 gtk_label_set_text(GTK_LABEL(label), title);
 
                 // Also update window title if this is the active tab
                 if (i == gtk_notebook_get_current_page(notebook)) {
                     GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
-                    gtk_window_set_title(GTK_WINDOW(window), title);
+                    if (window)
+                        gtk_window_set_title(GTK_WINDOW(window), title);
                 }
             }
             break;
@@ -165,7 +170,6 @@ void on_notebook_page_added(GtkNotebook* notebook, GtkWidget* child, guint page_
     g_print("on_notebook_page_added: pages=%d\n", gtk_notebook_get_n_pages(notebook));
     // Show tabs if more than one page
     gboolean show_tabs = gtk_notebook_get_n_pages(notebook) > 1;
-    g_print("Setting show_tabs=%d\n", show_tabs);
     gtk_notebook_set_show_tabs(notebook, show_tabs);
 }
 
@@ -175,21 +179,55 @@ void on_notebook_page_removed(GtkNotebook* notebook, GtkWidget* child, guint pag
     (void)user_data;
     // Show tabs if more than one page
     gtk_notebook_set_show_tabs(notebook, gtk_notebook_get_n_pages(notebook) > 1);
-    // If no pages left, close window
+
+    // If no pages left, close window is already handled in on_child_exit_tab or elsewhere?
+    // Actually it's safer here too.
     if (gtk_notebook_get_n_pages(notebook) == 0) {
         GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
-        gtk_window_destroy(GTK_WINDOW(window));
+        if (window)
+            gtk_window_destroy(GTK_WINDOW(window));
+    }
+    else {
+        // Update window title for the now-current page
+        int current = gtk_notebook_get_current_page(notebook);
+        if (current >= 0) {
+            GtkWidget* page = gtk_notebook_get_nth_page(notebook, current);
+            GtkWidget* vt_child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(page));
+            if (vt_child && VTE_IS_TERMINAL(vt_child)) {
+                g_autofree char* title = get_terminal_title(VTE_TERMINAL(vt_child));
+                GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
+                if (window)
+                    gtk_window_set_title(GTK_WINDOW(window), title);
+                gtk_widget_grab_focus(vt_child);
+            }
+        }
     }
 }
 
 void on_notebook_switch_page(GtkNotebook* notebook, GtkWidget* page, guint page_num, gpointer user_data) {
     (void)page;
     (void)user_data;
-    // Update window title to active tab's title
+
     GtkWidget* scr = gtk_notebook_get_nth_page(notebook, page_num);
+    if (!scr || !GTK_IS_SCROLLED_WINDOW(scr))
+        return;
     GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(scr));
+    if (!child || !VTE_IS_TERMINAL(child))
+        return;
+
     VteTerminal* vt = VTE_TERMINAL(child);
+
+    // Update window title explicitly using the new page's terminal
+    g_autofree char* title = get_terminal_title(vt);
+    GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
+    if (window)
+        gtk_window_set_title(GTK_WINDOW(window), title);
+
+    // Also update the tab label just in case
     update_tab_title(vt, notebook);
+
+    // Ensure the terminal has focus
+    gtk_widget_grab_focus(GTK_WIDGET(vt));
 }
 
 void close_current_tab(GtkNotebook* notebook) {
