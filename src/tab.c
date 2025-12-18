@@ -95,8 +95,7 @@ void on_child_exit_tab(VteTerminal* vt, int status, GtkNotebook* notebook) {
     }
     // If no pages left, close window
     if (gtk_notebook_get_n_pages(notebook) == 0) {
-        GtkWidget* window = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
-        gtk_window_destroy(GTK_WINDOW(window));
+        // Handled in on_notebook_page_removed
     }
 }
 

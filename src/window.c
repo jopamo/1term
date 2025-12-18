@@ -64,7 +64,7 @@ void update_css_transparency(void) {
         return;
     gdouble alpha = transparency_enabled ? 0.95 : 1.0;
     g_autofree char* css = g_strdup_printf(
-        "window{background-color:rgba(0,0,0,0); margin: 5px; border: 1px solid rgba(255,255,255,0.1);} "
+        "window{background-color:rgba(0,0,0,0); border: 1px solid rgba(255,255,255,0.1);} "
         ".hidden-titlebar{min-height:0;margin:0;padding:0;border:none;background:none;box-shadow:none;} "
         "notebook{background-color:rgba(0,0,0,0);} "
         "notebook > header{background-color:rgba(0,0,0,%g);} "
@@ -196,12 +196,28 @@ static void on_close_window_clicked(GtkButton* btn, gpointer user_data) {
     gtk_window_close(win);
 }
 
-static void on_notebook_click_pressed(GtkGestureClick* gesture, int n_press, double x, double y, gpointer user_data) {
-    (void)n_press;
-    (void)x;
-    (void)y;
-    GtkWidget* notebook = GTK_WIDGET(user_data);
-    GtkWidget* win = gtk_widget_get_ancestor(notebook, GTK_TYPE_WINDOW);
+static void on_notebook_drag_begin(GtkGestureDrag* gesture, double start_x, double start_y, gpointer user_data) {
+    GtkNotebook* notebook = GTK_NOTEBOOK(user_data);
+
+    // Get the widget that was actually clicked
+    GtkWidget* target = gtk_widget_pick(GTK_WIDGET(notebook), start_x, start_y, GTK_PICK_DEFAULT);
+    if (!target)
+        target = GTK_WIDGET(notebook);
+
+    // Do not initiate move if we clicked on a button (like close/min/max)
+    if (gtk_widget_get_ancestor(target, GTK_TYPE_BUTTON))
+        return;
+
+    // Do not initiate move if we clicked inside the terminal/page area
+    int n_pages = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n_pages; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        if (target == page || gtk_widget_is_ancestor(target, page)) {
+            return;
+        }
+    }
+
+    GtkWidget* win = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
     if (!win)
         return;
 
@@ -209,9 +225,10 @@ static void on_notebook_click_pressed(GtkGestureClick* gesture, int n_press, dou
     GdkSurface* surface = gtk_native_get_surface(native);
 
     if (GDK_IS_TOPLEVEL(surface)) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
         gdk_toplevel_begin_move(GDK_TOPLEVEL(surface),
                                 gtk_event_controller_get_current_event_device(GTK_EVENT_CONTROLLER(gesture)),
-                                gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)), x, y,
+                                gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)), start_x, start_y,
                                 gtk_event_controller_get_current_event_time(GTK_EVENT_CONTROLLER(gesture)));
     }
 }
@@ -241,9 +258,9 @@ void create_window(GtkApplication* app) {
     g_signal_connect(notebook, "switch-page", G_CALLBACK(on_notebook_switch_page), NULL);
 
     // Add gesture for dragging from empty space
-    GtkGesture* gesture = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);  // Listen to all buttons (usually left=1)
-    g_signal_connect(gesture, "pressed", G_CALLBACK(on_notebook_click_pressed), notebook);
+    GtkGesture* gesture = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 1);  // Listen to primary button (left click)
+    g_signal_connect(gesture, "drag-begin", G_CALLBACK(on_notebook_drag_begin), notebook);
     gtk_widget_add_controller(GTK_WIDGET(notebook), GTK_EVENT_CONTROLLER(gesture));
 
     // Create action widget (box) for window controls
