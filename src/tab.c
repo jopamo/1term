@@ -205,13 +205,12 @@ void on_notebook_page_removed(GtkNotebook* notebook, GtkWidget* child, guint pag
 }
 
 void on_notebook_switch_page(GtkNotebook* notebook, GtkWidget* page, guint page_num, gpointer user_data) {
-    (void)page;
+    (void)page_num;
     (void)user_data;
 
-    GtkWidget* scr = gtk_notebook_get_nth_page(notebook, page_num);
-    if (!scr || !GTK_IS_SCROLLED_WINDOW(scr))
+    if (!page || !GTK_IS_SCROLLED_WINDOW(page))
         return;
-    GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(scr));
+    GtkWidget* child = gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(page));
     if (!child || !VTE_IS_TERMINAL(child))
         return;
 
@@ -229,7 +228,6 @@ void on_notebook_switch_page(GtkNotebook* notebook, GtkWidget* page, guint page_
     // Ensure the terminal has focus
     gtk_widget_grab_focus(GTK_WIDGET(vt));
 }
-
 void close_current_tab(GtkNotebook* notebook) {
     int current = gtk_notebook_get_current_page(notebook);
     if (current >= 0) {
