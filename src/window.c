@@ -205,21 +205,53 @@ static void on_notebook_drag_begin(GtkGestureDrag* gesture, double start_x, doub
         target = GTK_WIDGET(notebook);
 
     // Do not initiate move if we clicked on a button (like close/min/max)
-    if (gtk_widget_get_ancestor(target, GTK_TYPE_BUTTON))
+    if (gtk_widget_get_ancestor(target, GTK_TYPE_BUTTON)) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
         return;
+    }
 
     // Do not initiate move if we clicked inside the terminal/page area
     int n_pages = gtk_notebook_get_n_pages(notebook);
     for (int i = 0; i < n_pages; i++) {
         GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
         if (target == page || gtk_widget_is_ancestor(target, page)) {
+            gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+            return;
+        }
+    }
+
+    // Do not initiate move if the drag started on a tab. Otherwise, small pointer
+    // movements while clicking can be interpreted as a window drag, making tab
+    // switching feel flaky (e.g., requiring double-clicks).
+    for (int i = 0; i < n_pages; i++) {
+        GtkWidget* page = gtk_notebook_get_nth_page(notebook, i);
+        GtkWidget* tab_label = page ? gtk_notebook_get_tab_label(notebook, page) : NULL;
+        if (!tab_label)
+            continue;
+
+        graphene_rect_t bounds;
+        if (gtk_widget_compute_bounds(tab_label, GTK_WIDGET(notebook), &bounds)) {
+            const float x0 = bounds.origin.x;
+            const float y0 = bounds.origin.y;
+            const float x1 = x0 + bounds.size.width;
+            const float y1 = y0 + bounds.size.height;
+            if (start_x >= x0 && start_x < x1 && start_y >= y0 && start_y < y1) {
+                gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+                return;
+            }
+        }
+
+        if (target == tab_label || gtk_widget_is_ancestor(target, tab_label)) {
+            gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
             return;
         }
     }
 
     GtkWidget* win = gtk_widget_get_ancestor(GTK_WIDGET(notebook), GTK_TYPE_WINDOW);
-    if (!win)
+    if (!win) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
         return;
+    }
 
     GtkNative* native = GTK_NATIVE(win);
     GdkSurface* surface = gtk_native_get_surface(native);
@@ -230,6 +262,9 @@ static void on_notebook_drag_begin(GtkGestureDrag* gesture, double start_x, doub
                                 gtk_event_controller_get_current_event_device(GTK_EVENT_CONTROLLER(gesture)),
                                 gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)), start_x, start_y,
                                 gtk_event_controller_get_current_event_time(GTK_EVENT_CONTROLLER(gesture)));
+    }
+    else {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
     }
 }
 
