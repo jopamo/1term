@@ -168,17 +168,16 @@ void on_notebook_page_added(GtkNotebook* notebook, GtkWidget* child, guint page_
     (void)page_num;
     (void)user_data;
     g_print("on_notebook_page_added: pages=%d\n", gtk_notebook_get_n_pages(notebook));
-    // Show tabs if more than one page
-    gboolean show_tabs = gtk_notebook_get_n_pages(notebook) > 1;
-    gtk_notebook_set_show_tabs(notebook, show_tabs);
+    // Always show tabs
+    gtk_notebook_set_show_tabs(notebook, TRUE);
 }
 
 void on_notebook_page_removed(GtkNotebook* notebook, GtkWidget* child, guint page_num, gpointer user_data) {
     (void)child;
     (void)page_num;
     (void)user_data;
-    // Show tabs if more than one page
-    gtk_notebook_set_show_tabs(notebook, gtk_notebook_get_n_pages(notebook) > 1);
+    // Always show tabs
+    gtk_notebook_set_show_tabs(notebook, TRUE);
 
     // If no pages left, close window is already handled in on_child_exit_tab or elsewhere?
     // Actually it's safer here too.

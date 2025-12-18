@@ -64,7 +64,8 @@ void update_css_transparency(void) {
         return;
     gdouble alpha = transparency_enabled ? 0.95 : 1.0;
     g_autofree char* css = g_strdup_printf(
-        "window{background-color:rgba(0,0,0,0);} "
+        "window{background-color:rgba(0,0,0,0); margin: 5px; border: 1px solid rgba(255,255,255,0.1);} "
+        ".hidden-titlebar{min-height:0;margin:0;padding:0;border:none;background:none;box-shadow:none;} "
         "notebook{background-color:rgba(0,0,0,0);} "
         "notebook > header{background-color:rgba(0,0,0,%g);} "
         "notebook > stack{background-color:rgba(0,0,0,0);} "
@@ -174,11 +175,61 @@ GtkNotebook* get_notebook_from_terminal(VteTerminal* vt) {
     return GTK_NOTEBOOK(notebook);
 }
 
+static void on_minimize_clicked(GtkButton* btn, gpointer user_data) {
+    (void)btn;
+    GtkWindow* win = GTK_WINDOW(user_data);
+    gtk_window_minimize(win);
+}
+
+static void on_maximize_clicked(GtkButton* btn, gpointer user_data) {
+    (void)btn;
+    GtkWindow* win = GTK_WINDOW(user_data);
+    if (gtk_window_is_maximized(win))
+        gtk_window_unmaximize(win);
+    else
+        gtk_window_maximize(win);
+}
+
+static void on_close_window_clicked(GtkButton* btn, gpointer user_data) {
+    (void)btn;
+    GtkWindow* win = GTK_WINDOW(user_data);
+    gtk_window_close(win);
+}
+
+static void on_notebook_click_pressed(GtkGestureClick* gesture, int n_press, double x, double y, gpointer user_data) {
+    (void)n_press;
+    (void)x;
+    (void)y;
+    GtkWidget* notebook = GTK_WIDGET(user_data);
+    GtkWidget* win = gtk_widget_get_ancestor(notebook, GTK_TYPE_WINDOW);
+    if (!win)
+        return;
+
+    GtkNative* native = GTK_NATIVE(win);
+    GdkSurface* surface = gtk_native_get_surface(native);
+
+    if (GDK_IS_TOPLEVEL(surface)) {
+        gdk_toplevel_begin_move(GDK_TOPLEVEL(surface),
+                                gtk_event_controller_get_current_event_device(GTK_EVENT_CONTROLLER(gesture)),
+                                gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)), x, y,
+                                gtk_event_controller_get_current_event_time(GTK_EVENT_CONTROLLER(gesture)));
+    }
+}
+
 void create_window(GtkApplication* app) {
     static int window_count = 0;
 
     GtkWidget* win = my_window_new(app);
     MyWindow* mywin = MY_WINDOW(win);
+
+    // Explicitly allow resizing
+    gtk_window_set_resizable(GTK_WINDOW(win), TRUE);
+    gtk_window_set_decorated(GTK_WINDOW(win), TRUE);
+
+    // Use a custom (empty) titlebar to enable CSD but hide the default header bar
+    GtkWidget* titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(titlebar, "hidden-titlebar");
+    gtk_window_set_titlebar(GTK_WINDOW(win), titlebar);
 
     // Create notebook
     GtkNotebook* notebook = GTK_NOTEBOOK(gtk_notebook_new());
@@ -189,7 +240,38 @@ void create_window(GtkApplication* app) {
     g_signal_connect(notebook, "page-removed", G_CALLBACK(on_notebook_page_removed), NULL);
     g_signal_connect(notebook, "switch-page", G_CALLBACK(on_notebook_switch_page), NULL);
 
-    // Set notebook as window child
+    // Add gesture for dragging from empty space
+    GtkGesture* gesture = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);  // Listen to all buttons (usually left=1)
+    g_signal_connect(gesture, "pressed", G_CALLBACK(on_notebook_click_pressed), notebook);
+    gtk_widget_add_controller(GTK_WIDGET(notebook), GTK_EVENT_CONTROLLER(gesture));
+
+    // Create action widget (box) for window controls
+    GtkWidget* action_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_valign(action_box, GTK_ALIGN_CENTER);
+
+    // Minimize
+    GtkWidget* btn_min = gtk_button_new_from_icon_name("window-minimize-symbolic");
+    gtk_button_set_has_frame(GTK_BUTTON(btn_min), FALSE);
+    g_signal_connect(btn_min, "clicked", G_CALLBACK(on_minimize_clicked), win);
+    gtk_box_append(GTK_BOX(action_box), btn_min);
+
+    // Maximize
+    GtkWidget* btn_max = gtk_button_new_from_icon_name("window-maximize-symbolic");
+    gtk_button_set_has_frame(GTK_BUTTON(btn_max), FALSE);
+    g_signal_connect(btn_max, "clicked", G_CALLBACK(on_maximize_clicked), win);
+    gtk_box_append(GTK_BOX(action_box), btn_max);
+
+    // Close
+    GtkWidget* btn_close = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_button_set_has_frame(GTK_BUTTON(btn_close), FALSE);
+    g_signal_connect(btn_close, "clicked", G_CALLBACK(on_close_window_clicked), win);
+    gtk_box_append(GTK_BOX(action_box), btn_close);
+
+    gtk_widget_set_visible(action_box, TRUE);
+    gtk_notebook_set_action_widget(notebook, action_box, GTK_PACK_END);
+
+    // Set notebook as window child (no wrapper)
     gtk_window_set_child(GTK_WINDOW(win), GTK_WIDGET(notebook));
 
     setup_window_size(win, window_count);
