@@ -1,82 +1,75 @@
-# 1term - Hacking Guide
+# HACKING
 
-1term is a GPU-accelerated VTE terminal widget embedded in a GTK 4 application.
+This is the contributor and agent guide for modifying 1term.
 
-## Overview
+Architecture and internal system details live in `DESIGN.md`.
 
-This project embeds a VTE terminal widget inside a GTK 4 application, leveraging GPU-accelerated rendering (via GTK 4’s rendering back-end) to improve rendering performance, scroll/render latency, reduce CPU load, and make the terminal responsive even under heavy output or high-refresh displays.
-
-GTK 4 + VTE (GTK4-flavor) is supported: the library provides `libvte-2.91-gtk4` / `libvte-2.91` for GTK-4 builds.
-
-## Development Environment
+## Development Setup
 
 ### Dependencies
 
 To build and run 1term, you need:
 
-- **GTK 4**: Version 4.14 or later is recommended for the stable "new NGL renderer".
-- **VTE**: Version ≥0.70 with GTK 4 support (`vte-2.91-gtk4`).
-- **Build System**: `meson` and `ninja`.
-- **Compiler**: A C compiler (GCC or Clang).
+- GTK 4 (>= 4.14 recommended)
+- VTE (>= 0.70, GTK 4 build: `vte-2.91-gtk4`)
+- libzstd (`libzstd`)
+- Meson + Ninja
+- A C compiler (GCC or Clang)
+- `clang-format` (formatting)
 
-### Building and Running
+Example packages:
 
-1.  **Configure the build:**
-    ```bash
-    meson setup build
-    ```
+- Debian/Ubuntu: `sudo apt install meson ninja-build gcc pkg-config libgtk-4-dev libvte-2.91-gtk4-dev libzstd-dev clang-format`
+- Fedora: `sudo dnf install meson ninja-build gcc pkg-config gtk4-devel vte291-gtk4-devel zstd-devel clang`
+- Arch: `sudo pacman -S meson ninja gcc pkg-config gtk4 vte4 zstd clang`
 
-2.  **Build the project:**
-    ```bash
-    meson compile -C build
-    ```
+## Build and Test
 
-3.  **Run the application:**
-    ```bash
-    ./build/src/1term
-    ```
+Configure and build:
 
-4.  **Run tests:**
-    ```bash
-    meson test -C build
-    ```
+```bash
+meson setup build
+meson compile -C build
+```
 
-## Coding Guidelines
+Run:
 
-### Language and Style
+```bash
+./build/1term
+```
 
-- **Language**: The project is written in **C**.
-- **Formatting**: We use `clang-format`. Please run the formatter before submitting changes to ensure consistent style.
-
-### Hacking & Architecture
-
-- **GPU Acceleration**: Prefer native GTK 4 drawing primitives over Cairo where possible to maximize GPU acceleration.
-- **Frame Clock**: Sync custom drawing operations to the GTK 4 frame clock.
-- **Performance**:
-    - Avoid blocking the main thread.
-    - Batch redraws for high-throughput output.
-    - Use double-buffering / frame-clock aware redraws.
-    - Minimize unnecessary allocations and rendering of invisible regions.
-- **Design**:
-    - Respect standard terminal behavior (escape sequences, resizing, Unicode).
-    - Ensure styling (CSS/padding) does not degrade GPU-backed rendering performance.
-
-## Contributing
-
-### Proposing Changes
-
-1.  Fork the repository and create a feature branch.
-2.  Make your changes, ensuring they follow the coding guidelines.
-3.  Test your changes under both light and heavy load (e.g., flood stdout).
-4.  Run the test suite to ensure no regressions.
-5.  Submit a pull request (or patch) with a clear description of the changes.
-
-### Testing
-
-Before submitting, please run the full test suite:
+Tests:
 
 ```bash
 meson test -C build
 ```
 
-Additionally, validate performance using a profiler (e.g., `perf`) if modifying rendering paths, and test on different backends (X11, Wayland) if possible.
+Useful variants:
+
+- Reconfigure from scratch: `meson setup build --wipe`
+- Debug build: `meson setup build-debug -Dbuildtype=debug && meson compile -C build-debug`
+- ASan build:
+  - `meson setup build-asan -Dbuildtype=debug -Db_sanitize=address`
+  - Run with suppressions: `ASAN_OPTIONS=suppressions=$(pwd)/asan.supp ./build-asan/1term`
+
+## Coding Standards
+
+- Language: C (project sets `c_std=c2x` in Meson).
+- Formatting: run `clang-format` on changed C/H files (uses `.clang-format` in the repo root).
+  - Example: `clang-format -i src/*.c src/*.h`
+- Performance and rendering:
+  - Avoid blocking the GTK main thread (offload heavy work to background threads).
+  - Prefer native GTK 4 drawing primitives over Cairo to keep rendering GPU-backed.
+  - If adding custom drawing, sync to the GTK frame clock and avoid unnecessary allocations/redraws.
+- Terminal correctness:
+  - Preserve expected terminal behavior (escape sequences, resizing, Unicode).
+  - Be careful with styling (CSS/padding) that can degrade terminal rendering performance.
+
+## Contribution Flow
+
+1. Create a branch (or prepare a patch).
+2. Make the change with minimal scope.
+3. Run `clang-format` on touched C/H files.
+4. Build and run tests: `meson compile -C build && meson test -C build`
+5. Do a quick manual run and stress test (e.g., flood output in a tab, open/close tabs, toggle scrollback/transparency).
+6. Submit a PR/patch with a clear description and any performance notes if applicable.
