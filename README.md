@@ -1,7 +1,6 @@
 # 1term
-<img width="967" height="240" alt="image" src="https://github.com/user-attachments/assets/82e8f7e0-cfd3-4234-b444-f907c1ef39ab" />
-
-A lightweight terminal emulator built with GTK 4 and VTE.
+A simple terminal emulator built with GTK 4 and VTE.
+<img width="954" height="215" alt="image" src="https://github.com/user-attachments/assets/e3cb4568-622f-4e8d-b956-2edfdc24510d" />
 
 ## Features
 
