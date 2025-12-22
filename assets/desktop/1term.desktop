@@ -9,3 +9,5 @@ Icon=1term
 Terminal=false
 Categories=System;TerminalEmulator;
 MimeType=application/x-shellscript;
+StartupWMClass=org.oneterm
+StartupNotify=true

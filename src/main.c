@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
 
     hard_disable_a11y();  // must run before GTK initialization
 
-    GtkApplication* app = gtk_application_new("com.example.oneterm", G_APPLICATION_NON_UNIQUE);
+    GtkApplication* app = gtk_application_new("org.oneterm", G_APPLICATION_NON_UNIQUE);
 
     g_signal_connect(app, "activate", G_CALLBACK(app_activate), NULL);
 
